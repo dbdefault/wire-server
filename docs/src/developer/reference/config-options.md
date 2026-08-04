@@ -2379,6 +2379,11 @@ spar:
       scimExternalIds: postgresql
 ```
 
+`spar` additionally exposes its own `spar.config.postgresMigration` block, using the
+same shared storage-location type. Spar-owned stores (e.g. SAML users, SCIM tokens,
+external ids) are added to it by their respective migration tasks; until then the
+block mirrors the shared defaults and stays on Cassandra.
+
 #### Migration for existing installations
 
 Existing installations should migrate Cassandra-backed data to PostgreSQL over
