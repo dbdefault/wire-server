@@ -893,9 +893,7 @@ spar:
       blockList: cassandra
       passwordReset: cassandra
       customBackend: cassandra
-      budget: cassandra
-      nonce: cassandra
-      connections: cassandra
+19: @ours
       scimTokens: cassandra
       scimExternalIds: cassandra
     richInfoLimit: 5000

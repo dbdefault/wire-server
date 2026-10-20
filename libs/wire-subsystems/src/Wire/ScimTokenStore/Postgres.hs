@@ -25,7 +25,10 @@ module Wire.ScimTokenStore.Postgres
 where
 
 import Data.Id
+<<<<<<< HEAD
 import Data.Map qualified as Map
+=======
+>>>>>>> 6bffaee90 (WPB-22972: migrate scim token and external-id stores to PostGreSQL)
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import Data.Vector (Vector)
@@ -127,11 +130,17 @@ lookupScimTokenPg token = do
     -- hashed row (both can exist if a previous conversion crashed between the
     -- upsert and the delete, or if the migration worker copied the plaintext
     -- row after a concurrent conversion): convert it to the hashed key and
+<<<<<<< HEAD
     -- delete the stale plaintext row, mirroring the C* re-keying. The
     -- conversion re-reads the row in-statement, so a revocation that raced the
     -- lookup cannot be resurrected here.
     _ | Just (ScimTokenLookupKeyPlaintext plain, info) <- find (isPlaintextKey . fst) byKey -> do
       pgConvertPlaintextToken plain
+=======
+    -- delete the stale plaintext row, mirroring the C* re-keying.
+    _ | Just (ScimTokenLookupKeyPlaintext plain, info) <- find (isPlaintextKey . fst) byKey -> do
+      pgConvertPlaintextToken plain info
+>>>>>>> 6bffaee90 (WPB-22972: migrate scim token and external-id stores to PostGreSQL)
       pure (Just info)
     ((_, info) : _) -> pure (Just info)
     [] -> pure Nothing
@@ -160,6 +169,7 @@ selectScimTokenByKeys =
                     WHERE token = ANY ($1 :: text[])
                     |]
 
+<<<<<<< HEAD
 -- | Re-key a plaintext token row to its hashed key: copy the CURRENT row
 -- contents under the hashed key, then delete the plaintext row. The
 -- @INSERT ... SELECT@ reads the row in-statement (not the detached result of
@@ -186,6 +196,15 @@ convertPlaintextStatement =
                          WHERE token = ($2 :: text)
                          ON CONFLICT (token) DO NOTHING
      |]
+=======
+-- | Re-key a plaintext token row to its hashed key: upsert under the hashed
+-- key, then delete the plaintext row. Used both by the Postgres read path and
+-- mirrored from the DualWrite interpreter.
+pgConvertPlaintextToken :: (PGConstraints r) => ScimToken -> ScimTokenInfo -> Sem r ()
+pgConvertPlaintextToken token info = do
+  upsertScimTokenByKey (ScimTokenLookupKeyHashed (hashScimToken token)) info
+  runStatement (postgresMarshall (ScimTokenLookupKeyPlaintext token)) deletePlaintextStatement
+>>>>>>> 6bffaee90 (WPB-22972: migrate scim token and external-id stores to PostGreSQL)
 
 deletePlaintextStatement :: Hasql.Statement Text ()
 deletePlaintextStatement =
@@ -198,6 +217,7 @@ getScimTokensPg team = do
   rows <- runStatement (postgresMarshall team) selectScimTokenByTeam
   pure $
     sortOn (.stiCreatedAt) $
+<<<<<<< HEAD
       mapMaybe fromScimTokenPgRow $
         Map.elems $
           Map.fromListWith preferPlaintextKey [(tokenId r, r) | r <- V.toList rows]
@@ -215,6 +235,9 @@ getScimTokensPg team = do
       Right ScimTokenLookupKeyPlaintext {} -> True
       _ -> False
     tokenId (_, _, tid, _, _, _, _) = tid
+=======
+      mapMaybe fromScimTokenPgRow (V.toList rows)
+>>>>>>> 6bffaee90 (WPB-22972: migrate scim token and external-id stores to PostGreSQL)
 
 selectScimTokenByTeam :: Hasql.Statement UUID (Vector (Text, UUID, UUID, UTCTime, Maybe UUID, Text, Maybe Text))
 selectScimTokenByTeam =

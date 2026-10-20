@@ -1049,7 +1049,16 @@ defaultTestOpts =
             user = CassandraStorage,
             blockList = CassandraStorage,
             passwordReset = CassandraStorage,
+<<<<<<< HEAD
 18: @ours
+=======
+            customBackend = CassandraStorage,
+            budget = CassandraStorage,
+            nonce = CassandraStorage,
+            connections = CassandraStorage,
+            scimTokens = CassandraStorage,
+            scimExternalIds = CassandraStorage
+>>>>>>> 6bffaee90 (WPB-22972: migrate scim token and external-id stores to PostGreSQL)
           },
       postgresqlPassword = Nothing
     }
