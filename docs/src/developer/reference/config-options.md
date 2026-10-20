@@ -2338,6 +2338,7 @@ galley:
       connections: postgresql
       scimTokens: postgresql
       scimExternalIds: postgresql
+      samlUsers: postgresql
 background-worker:
   config:
     migrateConversations: false
@@ -2351,6 +2352,7 @@ background-worker:
     migrateConnections: false
     migrateScimTokens: false
     migrateScimExternalIds: false
+    migrateSamlUsers: false
 ```
 
 `spar` additionally exposes its own `spar.config.postgresMigration` block, using the
@@ -2420,6 +2422,7 @@ The current settings and their background-worker flags are:
 - `connections` -> `migrateConnections`
 - `scimTokens` -> `migrateScimTokens`
 - `scimExternalIds` -> `migrateScimExternalIds`
+- `samlUsers` -> `migrateSamlUsers`
 
 **Migration pattern per migration setting**
 
@@ -2468,6 +2471,8 @@ The current settings and their background-worker flags are:
        migrateScimTokens: false
        migrateScimExternalIds: false
    ```
+       migrateSamlUsers: false
+    ```
 
     This change should restart the affected pods, and new writes will follow the
    migration interpreter.
@@ -2520,6 +2525,7 @@ The current settings and their background-worker flags are:
    - `connections`: `wire_connections_migration_finished`
    - `scimTokens`: `wire_scim_tokens_migration_finished`
    - `scimExternalIds`: `wire_scim_external_ids_migration_finished`
+   - `samlUsers`: `wire_saml_users_migration_finished`
 
 3. Cut over reads and writes to PostgreSQL for the selected migration
    setting(s). This configuration must be used from now on for every new
@@ -2542,11 +2548,13 @@ The current settings and their background-worker flags are:
          connections: postgresql
          scimTokens: postgresql
          scimExternalIds: postgresql
+         samlUsers: postgresql
    spar:
      config:
        postgresMigration:
          scimTokens: postgresql
          scimExternalIds: postgresql
+         samlUsers: postgresql
    background-worker:
      config:
        migrateConversations: false
@@ -2561,6 +2569,7 @@ The current settings and their background-worker flags are:
        migrateConnections: false
        migrateScimTokens: false
        migrateScimExternalIds: false
+       migrateSamlUsers: false
    ```
 
 **How to run migrations independently or in batches**
@@ -2656,6 +2665,7 @@ migrateNonce: false
 migrateConnections: false
 migrateScimTokens: false
 migrateScimExternalIds: false
+migrateSamlUsers: false
 
 # migration settings
 migrationOptions:

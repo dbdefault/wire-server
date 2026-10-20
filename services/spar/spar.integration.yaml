@@ -51,14 +51,13 @@ postgresMigration:
   user: cassandra
   blockList: cassandra
   passwordReset: cassandra
-<<<<<<< HEAD
-17: @ours
-=======
   customBackend: cassandra
-  customBackend: postgresql
+  budget: cassandra
+  nonce: cassandra
+  connections: cassandra
   scimTokens: postgresql
   scimExternalIds: postgresql
->>>>>>> 6bffaee90 (WPB-22972: migrate scim token and external-id stores to PostGreSQL)
+  samlUsers: postgresql
 
   # Wire/AWS specific, optional
 # discoUrl: "https://"

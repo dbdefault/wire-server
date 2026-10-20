@@ -318,6 +318,7 @@ galley:
       connections: {{ .Values.connectionsStore }}
       scimTokens: {{ .Values.scimTokensStore }}
       scimExternalIds: {{ .Values.scimExternalIdsStore }}
+      samlUsers: {{ .Values.samlUsersStore }}
     settings:
       maxConvAndTeamSize: 16
       maxTeamSize: 32
@@ -616,7 +617,14 @@ spar:
       user: {{ .Values.userStore }}
       blockList: {{ .Values.blockListStore }}
       passwordReset: {{ .Values.passwordReset }}
-44: @ours
+      customBackend: {{ .Values.customBackendStore }}
+      budget: {{ .Values.budgetStore }}
+      nonce: {{ .Values.nonceStore }}
+      connections: {{ .Values.connectionsStore }}
+      scimTokens: {{ .Values.scimTokensStore }}
+      scimExternalIds: {{ .Values.scimExternalIdsStore }}
+      samlUsers: {{ .Values.samlUsersStore }}
+    logLevel: Debug
     domain: zinfra.io
     appUri: http://spar:8080/
     ssoUri: http://spar:8080/sso
