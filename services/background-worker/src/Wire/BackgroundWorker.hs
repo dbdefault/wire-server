@@ -134,6 +134,12 @@ run opts galleyOpts = do
         runAppT env $
           withNamedLogger "migrate-connections" $
             Migrations.connections opts.migrationOptions
+  cleanupSamlUsersMigration <-
+    if opts.migrateSamlUsers
+      then
+        runAppT env $
+          withNamedLogger "migrate-saml-users" $
+            Migrations.samlUsers opts.migrationOptions
       else pure $ pure ()
   cleanupSamlUsersMigration <-
     if opts.migrateSamlUsers
