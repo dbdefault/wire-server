@@ -20,7 +20,19 @@
 -- table, and rows are only ever mutated (never garbage collected) — the
 -- insert-if-absent plus writetime-guarded reconciliation keeps re-runs
 -- idempotent.
-module Wire.TeamStore.Migration (migrateTeamLoop) where
+--
+-- 'migrateTeamMembersLoop' additionally migrates the member tables
+-- (@team_member@, @user_team@, @billing_team_member@, @team_admin@), also
+-- copy-only: the listing effects that read those tables in Cassandra
+-- ('TeamMemberStore', the team listings) are not migrated yet, so deleting
+-- the Cassandra rows would empty them before their readers move to
+-- Postgres.  The copy runs under per-(team, user) exclusive locks; the
+-- dual-write interpreter takes the matching shared locks on member writes.
+module Wire.TeamStore.Migration
+  ( migrateTeamLoop,
+    migrateTeamMembersLoop,
+  )
+where
 
 import Cassandra hiding (Value)
 import Cassandra.Util (Writetime, writetimeToUTC)
@@ -28,10 +40,14 @@ import Data.Conduit
 import Data.Conduit.List qualified as C
 import Data.IORef qualified as IORef
 import Data.Id
+import Data.Json.Util (UTCTimeMillis (..), fromUTCTimeMillis)
+import Data.LegalHold (UserLegalHoldStatus)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as T
 import Data.Time
 import Data.UUID (UUID)
+import Data.Vector (Vector)
+import Hasql.Pool qualified as HasqlPool
 import Hasql.Pool.Extended qualified as Hasql
 import Imports
 import Polysemy
@@ -40,6 +56,7 @@ import Polysemy.AtomicState
 import Polysemy.Conc (interpretRace)
 import Polysemy.Conc qualified as Conc
 import Polysemy.Conc.Effect.Race hiding (Timeout)
+import Polysemy.Error (Error, runError)
 import Polysemy.Input
 import Polysemy.Resource (Resource, bracket, resourceToIOFinal)
 import Polysemy.TinyLog
@@ -49,14 +66,17 @@ import UnliftIO qualified
 import Wire.API.PostgresMarshall
 import Wire.API.Routes.Internal.Galley.TeamsIntra
 import Wire.API.Team
+import Wire.API.Team.Permission (Permissions)
 import Wire.API.Team.SearchVisibility
 import Wire.ConversationStore.Cassandra.Instances ()
 import Wire.Migration
+import Wire.MigrationLock
 import Wire.Postgres
 import Wire.Sem.Logger (mapLogger)
 import Wire.Sem.Logger.TinyLog (loggerToTinyLog)
 import Wire.TeamStore.Cassandra.Queries qualified as Cql
 import Wire.TeamStore.Postgres qualified as Postgres
+import Wire.Util (embedClientInput)
 
 type EffectStack =
   [ AtomicState Int,
