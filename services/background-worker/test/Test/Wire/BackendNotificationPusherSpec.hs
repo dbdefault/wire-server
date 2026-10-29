@@ -501,9 +501,13 @@ spec = do
                 blockList = CassandraStorage,
                 passwordReset = CassandraStorage,
                 customBackend = CassandraStorage,
+<<<<<<< HEAD
                 budget = CassandraStorage,
                 nonce = CassandraStorage,
                 connections = CassandraStorage
+=======
+                clients = CassandraStorage
+>>>>>>> 5a95859ea6 (fix: post-rebuild)
               }
           gundeckEndpoint = undefined
           brigEndpoint = undefined
@@ -572,9 +576,13 @@ spec = do
                 blockList = CassandraStorage,
                 passwordReset = CassandraStorage,
                 customBackend = CassandraStorage,
+<<<<<<< HEAD
                 budget = CassandraStorage,
                 nonce = CassandraStorage,
                 connections = CassandraStorage
+=======
+                clients = CassandraStorage
+>>>>>>> 5a95859ea6 (fix: post-rebuild)
               }
           gundeckEndpoint = undefined
           brigEndpoint = undefined
