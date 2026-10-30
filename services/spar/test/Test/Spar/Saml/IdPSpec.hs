@@ -1049,7 +1049,7 @@ defaultTestOpts =
             user = CassandraStorage,
             blockList = CassandraStorage,
             passwordReset = CassandraStorage,
-16: @ours
+18: @ours
           },
       postgresqlPassword = Nothing
     }
