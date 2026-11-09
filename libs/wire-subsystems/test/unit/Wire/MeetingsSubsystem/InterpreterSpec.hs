@@ -298,7 +298,10 @@ mkHostUser uid name email loc = do
     base
       { userQualifiedId = Qualified uid (Domain "wire.com"),
         userDisplayName = Name name,
+        -- Model a verified email: 'meetingHostProfile' reads 'userEmail'
+        -- (identity-derived), not 'userEmailUnvalidated'.
         userEmailUnvalidated = email,
+        userIdentity = EmailIdentity <$> email,
         userLocale = loc
       }
 
@@ -3037,6 +3040,23 @@ specMeetingEmails =
           -- addrD only ever sees the invitation from replaceInvitedEmails.
           length (contents mailsD) `shouldBe` 1
           total `shouldBe` 4
+
+    it "does not re-invite an address that is already invited (add)" $ do
+      result <- runTestStack now0 gen0 Map.empty def $ do
+        plantHost uid1 (Just hostEmail) hostLocale
+        meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
+        _ <- addInvitedEmails zUser1 meeting.meeting.id [addrA, addrB]
+        mailsA <- sentTo addrA
+        mailsB <- sentTo addrB
+        total <- totalEmails
+        pure (mailsA, mailsB, total)
+      case result of
+        Left err -> fail $ "Error: " <> show err
+        Right (mailsA, mailsB, total) -> do
+          -- addrA only sees the invitation from createMeeting.
+          length (contents mailsA) `shouldBe` 1
+          length (contents mailsB) `shouldBe` 1
+          total `shouldBe` 2
 
     it "sends no emails when the creator has no email address" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do

@@ -56,7 +56,7 @@ import Wire.API.Meeting qualified as API
 import Wire.API.Password (Password)
 import Wire.API.Routes.MultiTablePaging qualified as MultiTablePaging
 import Wire.API.Team.Feature (FeatureStatus (..), LockableFeature (..), MeetingsConfig)
-import Wire.API.User (BaseProtocolTag (BaseProtocolMLSTag), EmailAddress, User (..), fromName)
+import Wire.API.User (BaseProtocolTag (BaseProtocolMLSTag), EmailAddress, User (..), fromName, userEmail)
 import Wire.BrigAPIAccess (BrigAPIAccess)
 import Wire.BrigAPIAccess qualified as BrigAPIAccess
 import Wire.CodeStore (CodeStore)
@@ -873,7 +873,7 @@ dedup = List.nubOrd
 
 -- | Host identity and locale for meeting emails, taken from the creator's
 -- brig profile. 'Nothing' (after a warning) when the creator is unknown or
--- has no email address: the templates render "${host_name}
+-- has no verified email address: the templates render "${host_name}
 -- (${host_email})", so they cannot be rendered meaningfully.
 meetingHostProfile ::
   (Member BrigAPIAccess r, Member TinyLog r) =>
@@ -883,11 +883,11 @@ meetingHostProfile meeting = do
   users <- BrigAPIAccess.getUsers [meeting.creator]
   case listToMaybe users of
     Just user
-      | Just email <- user.userEmailUnvalidated ->
+      | Just email <- userEmail user ->
           pure (Just (fromName user.userDisplayName, email, user.userLocale))
     _ -> do
       TinyLog.warn $
-        Log.msg ("meeting email skipped: creator unknown or has no email address" :: ByteString)
+        Log.msg ("meeting email skipped: creator unknown or has no verified email address" :: ByteString)
           . Log.field "meetingId" (toByteString' meeting.id)
       pure Nothing
 
@@ -944,7 +944,7 @@ prepareMeetingEmails emailsEnabled domain sm recipients
                   . Log.field "meetingId" (toByteString' sm.id)
               pure Nothing
             -- The child succeeded; 'Nothing' inside means the creator is
-            -- unknown or has no email (already warn-logged in
+            -- unknown or has no verified email (already warn-logged in
             -- 'meetingHostProfile').
             Just Nothing -> pure Nothing
             Just (Just (hostName, hostEmail, loc)) -> do
@@ -1181,8 +1181,12 @@ addInvitedEmailsImpl zUser meetingId emails validityPeriod emailsEnabled = do
       guard $ storedMeeting.creator == tUnqualified zUser
       guard $ qDomain meetingId == tDomain zUser
       lift $ Store.addInvitedEmails (qUnqualified meetingId) emails
-      -- The request's addresses are exactly the newly invited ones.
-      lift $ sendMeetingEmailsFor emailsEnabled (tDomain zUser) storedMeeting emails sendMeetingInvitationEmail
+      -- The store unions into 'invited_emails', so only addresses not
+      -- already invited get an invitation: re-adding an address is a
+      -- no-op for mail. The snapshot is pre-add, which is the correct
+      -- baseline for the diff.
+      let newlyAdded = emails \\ storedMeeting.invitedEmails
+      lift $ sendMeetingEmailsFor emailsEnabled (tDomain zUser) storedMeeting newlyAdded sendMeetingInvitationEmail
 
   pure $ isJust result
 
