@@ -56,6 +56,7 @@ import Wire.API.Meeting qualified as API
 import Wire.API.Password (Password)
 import Wire.API.PostgresMarshall (PostgresUnmarshall (postgresUnmarshall))
 import Wire.API.Push.V2 qualified as PushV2
+import Wire.API.Routes.Internal.Brig (MeetingEmailKind (..), SendMeetingEmails (..))
 import Wire.API.Team.Feature
 import Wire.API.Team.Member (TeamMember, mkTeamMember)
 import Wire.API.Team.Permission (fullPermissions)
@@ -66,7 +67,6 @@ import Wire.CodeStore (CodeStore)
 import Wire.CodeStore qualified as CodeStore
 import Wire.CodeStore.Code (Code (..), CodeReferent (..))
 import Wire.ConversationSubsystem
-import Wire.EmailSubsystem (EmailSubsystem)
 import Wire.FeaturesConfigSubsystem
 import Wire.GalleyAPIAccess (GalleyAPIAccess)
 import Wire.HashPassword (HashPassword, verifyPassword)
@@ -124,10 +124,10 @@ type TestStack =
      CodeStore,
      State (Map Key (Code, Maybe Password)),
      Input (Either HttpsUrl (Map Domain HttpsUrl)),
-     EmailSubsystem,
      State (Map UserId User),
      State Bool,
-     State (Map EmailAddress [SentMail]),
+     State FailSendMeetingEmails,
+     State (IORef [SendMeetingEmails]),
      Embed IO,
      Final IO
    ]
@@ -208,13 +208,14 @@ runTestStackWithURICfg ::
   MeetingSystemConfig ->
   Sem TestStack a ->
   IO (Either (Tagged ('ActionDenied 'DeleteConversation) ()) (Either MeetingError a))
-runTestStackWithURICfg now gen convCodeURI teams configs lic cfg =
+runTestStackWithURICfg now gen convCodeURI teams configs lic cfg sem = do
+  rpcRef <- newIORef []
   runFinal @IO
     . embedToFinal @IO
-    . evalState (Map.empty :: Map EmailAddress [SentMail])
+    . evalState rpcRef
+    . evalState (FailSendMeetingEmails False)
     . evalState False
     . evalState (Map.empty :: Map UserId User)
-    . inMemoryEmailSubsystemInterpreter
     . fmap (either (error . show) (either (error . show) Imports.id))
     . runInputConst convCodeURI
     . evalState (Map.empty :: Map Key (Code, Maybe Password))
@@ -252,6 +253,7 @@ runTestStackWithURICfg now gen convCodeURI teams configs lic cfg =
     . mockBrigAPIAccess
     . asyncToIOFinal
     . interpretMeetingsSubsystem cfg
+    $ sem
 
 -- | An update that sets no fields (rejected with 'EmptyUpdate'); use record
 -- update on it to set individual fields.
@@ -270,14 +272,19 @@ extractMeetingEvents pushes =
   [e | push <- pushes, Success e <- [fromJSON (Object push.json)]]
 
 -- | Brig mock that only answers 'GetUsers' (used for meeting-email host
--- resolution); every other operation is a programming error. When the
--- 'Bool' failure knob is set, 'GetUsers' throws an 'RpcException' the way
--- the RPC interpreter does on a failing brig call. The knob must be set
--- before the operation that forks the lookup: the child sees a snapshot of
--- the pure state at fork time, so writes from inside the child are lost.
+-- resolution) and 'SendMeetingEmails' (recorded into an 'IORef', since the
+-- dispatch runs in a detached async child whose pure state writes are lost).
+-- Every other operation is a programming error. The 'Bool' knob makes
+-- 'GetUsers' throw an 'RpcException' the way the RPC interpreter does on a
+-- failing brig call; the 'FailSendMeetingEmails' knob does the same for
+-- 'SendMeetingEmails'. Knobs must be set before the operation that forks
+-- the child: the child sees a snapshot of the pure state at fork time.
 mockBrigAPIAccess ::
   ( Member (State (Map UserId User)) r,
     Member (State Bool) r,
+    Member (State FailSendMeetingEmails) r,
+    Member (State (IORef [SendMeetingEmails])) r,
+    Member (Embed IO) r,
     Member (Error RpcException) r
   ) =>
   InterpreterFor BrigAPIAccess r
@@ -287,7 +294,18 @@ mockBrigAPIAccess = interpret \case
     when failing $
       throw (RpcExceptionInternal {service = "brig", status = 502, message = "mock: host profile lookup failed"})
     gets (Map.elems . (`Map.restrictKeys` Set.fromList uids))
+  BrigAPIAccess.SendMeetingEmails payload -> do
+    FailSendMeetingEmails failing <- get @FailSendMeetingEmails
+    when failing $
+      throw (RpcExceptionInternal {service = "brig", status = 502, message = "mock: send meeting emails failed"})
+    ref <- get @(IORef [SendMeetingEmails])
+    embed $ atomicModifyIORef' ref (\ps -> (payload : ps, ()))
   _ -> error "mockBrigAPIAccess: unimplemented operation"
+
+-- | Set via 'State FailSendMeetingEmails'; makes the mock's
+-- 'SendMeetingEmails' handler throw an 'RpcException' (failing brig RPC).
+newtype FailSendMeetingEmails = FailSendMeetingEmails Bool
+  deriving stock (Eq, Show)
 
 -- | A brig user record for the meeting host (creator) with the given name,
 -- email and locale, everything else generated.
@@ -2937,90 +2955,101 @@ specMeetingEmails =
           mCode <- gets @(Map Key (Code, Maybe Password)) (Map.lookup key)
           maybe (error "no meeting code stored") (pure . fst) mCode
 
-    it "sends an invitation email to each invited address on create" $ do
+    it "sends one invitation RPC to brig covering all invited addresses on create" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA, addrB])
-        (,,,)
-          <$> sentTo addrA
-          <*> sentTo addrB
-          <*> totalEmails
-          <*> pure (Just meeting.meeting)
+        rpcs <- sentRpcs
+        pure (rpcs, meeting.meeting)
       case result of
         Left err -> fail $ "Error: " <> show err
-        Right (mailsA, mailsB, total, Just m) -> do
-          contents mailsA `shouldBe` [MeetingInvitationMail "Alice Host" hostEmail m]
-          map (.locale) mailsA `shouldBe` [Just hostLocale]
-          contents mailsB `shouldBe` contents mailsA
-          total `shouldBe` 2
-        Right (_, _, _, Nothing) -> expectationFailure "unexpected Nothing"
+        Right (rpcs, m) -> do
+          length rpcs `shouldBe` 1
+          case rpcs of
+            [rpc] -> do
+              rpc.kind `shouldBe` MeetingEmailInvitation
+              rpc.changeSummary `shouldBe` Nothing
+              rpc.recipients `shouldBe` [addrA, addrB]
+              rpc.meeting `shouldBe` m
+              rpc.hostName `shouldBe` "Alice Host"
+              rpc.hostEmail `shouldBe` hostEmail
+              rpc.locale `shouldBe` Just hostLocale
+            _ -> expectationFailure "expected exactly one RPC"
 
-    it "sends no emails for immediate meetings" $ do
+    it "sends no RPC for immediate meetings" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         _ <- createMeeting zUser1 testConnId (mkNewMeeting API.Immediate [addrA])
-        totalEmails
+        totalRecipients
       case result of
         Left err -> fail $ "Error: " <> show err
         Right total -> total `shouldBe` 0
 
-    it "sends an update email on a real change and none on a no-op update" $ do
+    it "sends an update RPC with change summary on a real change and none on a no-op update" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA, addrB])
         updated <- updateMeeting zUser1 testConnId meeting.meeting.id (titleUpdate (unsafeRange "Renamed"))
-        mailsAfterChange <- sentTo addrA
+        rpcsAfterChange <- sentRpcs
         _ <- updateMeeting zUser1 testConnId meeting.meeting.id (titleUpdate (unsafeRange "Renamed"))
-        mailsAfterNoop <- sentTo addrA
-        total <- totalEmails
-        pure (mailsAfterChange, mailsAfterNoop, total, updated, meeting.meeting)
+        rpcsAfterNoop <- sentRpcs
+        pure (rpcsAfterChange, rpcsAfterNoop, updated, meeting.meeting)
       case result of
         Left err -> fail $ "Error: " <> show err
-        Right (mailsAfterChange, mailsAfterNoop, total, Just updated, createdMeeting) -> do
-          let m = updated.meeting
-          contents mailsAfterChange
-            `shouldBe` [ MeetingInvitationMail "Alice Host" hostEmail createdMeeting,
-                         MeetingUpdateMail "Alice Host" hostEmail m "Title changed"
-                       ]
-          mailsAfterNoop `shouldBe` mailsAfterChange
-          total `shouldBe` 4 -- 2 invitations + 2 update mails (one per address)
-        Right (_, _, _, Nothing, _) -> expectationFailure "update unexpectedly returned Nothing"
+        Right (rpcsAfterChange, rpcsAfterNoop, Just updated, createdMeeting) -> do
+          length rpcsAfterChange `shouldBe` 2
+          case drop 1 rpcsAfterChange of
+            [rpc] -> do
+              rpc.kind `shouldBe` MeetingEmailUpdate
+              rpc.changeSummary `shouldBe` Just "Title changed"
+              rpc.recipients `shouldBe` [addrA, addrB]
+              rpc.meeting `shouldBe` updated.meeting
+            _ -> expectationFailure "expected exactly one update RPC"
+          -- The invitation RPC carries the meeting at creation time.
+          head rpcsAfterChange `shouldSatisfy` \rpc -> rpc.meeting == createdMeeting
+          rpcsAfterNoop `shouldBe` rpcsAfterChange
+        Right (_, _, Nothing, _) -> expectationFailure "update unexpectedly returned Nothing"
 
-    it "sends a 'Join link changed' update email on refreshMeetingLink" $ do
+    it "sends a \'Join link changed\' update RPC on refreshMeetingLink" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
         refreshed <- refreshMeetingLink zUser1 testConnId meeting.meeting.id (API.RefreshMeetingLinkRequest Nothing)
-        mails <- sentTo addrA
-        pure (mails, refreshed, meeting.meeting)
+        rpcs <- sentRpcs
+        pure (rpcs, refreshed)
       case result of
         Left err -> fail $ "Error: " <> show err
-        Right (mails, Just refreshed, createdMeeting) ->
-          -- The invitation carries the link at creation time; the update mail
-          -- the fresh (rotated) one.
-          contents mails
-            `shouldBe` [ MeetingInvitationMail "Alice Host" hostEmail createdMeeting,
-                         MeetingUpdateMail "Alice Host" hostEmail refreshed.meeting "Join link changed"
-                       ]
-        Right (_, Nothing, _) -> expectationFailure "refresh unexpectedly returned Nothing"
+        Right (rpcs, Just refreshed) -> do
+          length rpcs `shouldBe` 2
+          case drop 1 rpcs of
+            [rpc] -> do
+              rpc.kind `shouldBe` MeetingEmailUpdate
+              rpc.changeSummary `shouldBe` Just "Join link changed"
+              rpc.recipients `shouldBe` [addrA]
+              -- The update RPC carries the fresh (rotated) link.
+              rpc.meeting.link `shouldBe` refreshed.meeting.link
+            _ -> expectationFailure "expected exactly one update RPC"
+        Right (_, Nothing) -> expectationFailure "refresh unexpectedly returned Nothing"
 
-    it "sends a cancellation email per invited address on delete" $ do
+    it "sends a cancellation RPC on delete" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA, addrB])
         deleted <- deleteMeeting zUser1 testConnId meeting.meeting.id
-        mailsA <- sentTo addrA
-        total <- totalEmails
-        pure (deleted, mailsA, total, meeting.meeting)
+        rpcs <- sentRpcs
+        pure (deleted, rpcs, meeting.meeting)
       case result of
         Left err -> fail $ "Error: " <> show err
-        Right (deleted, mailsA, total, m) -> do
+        Right (deleted, rpcs, m) -> do
           deleted `shouldBe` True
-          contents mailsA
-            `shouldBe` [ MeetingInvitationMail "Alice Host" hostEmail m,
-                         MeetingCancelMail "Alice Host" hostEmail m
-                       ]
-          total `shouldBe` 4
+          length rpcs `shouldBe` 2
+          case drop 1 rpcs of
+            [rpc] -> do
+              rpc.kind `shouldBe` MeetingEmailCancel
+              rpc.changeSummary `shouldBe` Nothing
+              rpc.recipients `shouldBe` [addrA, addrB]
+              rpc.meeting `shouldBe` m
+            _ -> expectationFailure "expected exactly one cancel RPC"
 
     it "sends invitations only for newly added addresses (add/replace/remove)" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
@@ -3029,67 +3058,65 @@ specMeetingEmails =
         _ <- addInvitedEmails zUser1 meeting.meeting.id [addrB, addrC]
         _ <- replaceInvitedEmails zUser1 meeting.meeting.id [addrC, addrD]
         _ <- removeInvitedEmails zUser1 meeting.meeting.id [addrD]
-        (,,,,) <$> sentTo addrA <*> sentTo addrB <*> sentTo addrC <*> sentTo addrD <*> totalEmails
+        rpcs <- sentRpcs
+        pure (rpcs, meeting.meeting)
       case result of
         Left err -> fail $ "Error: " <> show err
-        Right (mailsA, mailsB, mailsC, mailsD, total) -> do
-          let expected = [MeetingInvitationMail "Alice Host" hostEmail (meetingForMailIn mailsA)]
-          contents mailsA `shouldBe` expected
-          contents mailsB `shouldBe` expected
-          contents mailsC `shouldBe` expected
-          -- addrD only ever sees the invitation from replaceInvitedEmails.
-          length (contents mailsD) `shouldBe` 1
-          total `shouldBe` 4
+        Right (rpcs, m) -> do
+          length rpcs `shouldBe` 3
+          -- addrA only in the create invitation; addrB added by add; addrC by
+          -- add; addrD only ever invited by replace.
+          concatMap (.recipients) rpcs `shouldBe` [addrA, addrB, addrC, addrD]
+          all (\rpc -> rpc.kind == MeetingEmailInvitation) rpcs `shouldBe` True
+          all (\rpc -> rpc.meeting.id == m.id) rpcs `shouldBe` True
 
     it "does not re-invite an address that is already invited (add)" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
         _ <- addInvitedEmails zUser1 meeting.meeting.id [addrA, addrB]
-        mailsA <- sentTo addrA
-        mailsB <- sentTo addrB
-        total <- totalEmails
-        pure (mailsA, mailsB, total)
+        rpcs <- sentRpcs
+        pure (rpcs, meeting.meeting)
       case result of
         Left err -> fail $ "Error: " <> show err
-        Right (mailsA, mailsB, total) -> do
+        Right (rpcs, m) -> do
+          length rpcs `shouldBe` 2
           -- addrA only sees the invitation from createMeeting.
-          length (contents mailsA) `shouldBe` 1
-          length (contents mailsB) `shouldBe` 1
-          total `shouldBe` 2
+          map (.recipients) rpcs `shouldBe` [[addrA], [addrB]]
+          all (\rpc -> rpc.meeting == m) rpcs `shouldBe` True
 
-    it "sends no emails when the creator has no email address" $ do
+    it "sends no RPC when the creator has no email address" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 Nothing hostLocale
         _ <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
-        totalEmails
+        totalRecipients
       case result of
         Left err -> fail $ "Error: " <> show err
         Right total -> total `shouldBe` 0
 
-    it "sends no emails for operations by a non-creator" $ do
+    it "sends no RPC for operations by a non-creator" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         plantHost uid2 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
         _ <- updateMeeting zUser2 testConnId meeting.meeting.id (titleUpdate (unsafeRange "Hijack"))
         deleted <- deleteMeeting zUser2 testConnId meeting.meeting.id
-        total <- totalEmails
-        pure (deleted, total)
+        rpcs <- sentRpcs
+        pure (deleted, rpcs)
       case result of
         Left err -> fail $ "Error: " <> show err
-        Right (deleted, total) -> do
+        Right (deleted, rpcs) -> do
           deleted `shouldBe` False
           -- The create still sent its invitation; the denied update/delete
-          -- must not have added any emails.
-          total `shouldBe` 1
+          -- must not have added any RPC.
+          length rpcs `shouldBe` 1
 
-    it "sends no emails when the license lacks the email flag" $ do
+    it "sends no RPC when the license lacks the email flag" $ do
       let noEmailLicense = fullLicense {meetings = (meetings fullLicense) {emailsSending = False}}
       result <- runTestStackWithURI now0 gen0 (Left testCodeURIBase) Map.empty def noEmailLicense $ do
         plantHost uid1 (Just hostEmail) hostLocale
         _ <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA, addrB])
-        totalEmails
+        totalRecipients
       case result of
         Right (Right total) -> total `shouldBe` 0
         Right (Left err) -> fail $ "Error: " <> show err
@@ -3099,16 +3126,15 @@ specMeetingEmails =
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         _ <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA, addrA, addrB])
-        mailsA <- sentTo addrA
-        total <- totalEmails
-        pure (mailsA, total)
+        rpcs <- sentRpcs
+        pure rpcs
       case result of
-        Right (mailsA, total) -> do
-          length mailsA `shouldBe` 1
-          total `shouldBe` 2
+        Right [rpc] ->
+          rpc.recipients `shouldBe` [addrA, addrB]
+        Right other -> expectationFailure $ "expected exactly one RPC, got: " <> show (length (other :: [SendMeetingEmails]))
         Left err -> fail $ "Error: " <> show err
 
-    it "sends no emails when meeting email settings are unconfigured" $ do
+    it "sends no RPC when meeting email settings are unconfigured" $ do
       let cfg =
             MeetingSystemConfig
               { legacyTimeZone = API.defaultLegacyTimeZone,
@@ -3119,55 +3145,72 @@ specMeetingEmails =
       result <- runTestStackWithURICfg now0 gen0 (Left testCodeURIBase) Map.empty def fullLicense cfg $ do
         plantHost uid1 (Just hostEmail) hostLocale
         _ <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA, addrB])
-        totalEmails
+        totalRecipients
       case result of
         Right (Right total) -> total `shouldBe` 0
         Right (Left err) -> fail $ "Error: " <> show err
         Left _denied -> expectationFailure "unexpected CheckDeleteLocalConversation denial"
 
-    it "sends no emails when the host profile lookup fails (brig error)" $ do
+    it "sends no RPC when the host profile lookup fails (brig error)" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         put True -- brig mock fails GetUsers
         _ <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA, addrB])
-        totalEmails
+        totalRecipients
       case result of
         Right total -> do
           -- The create must succeed despite the failing brig lookup, and no
-          -- mail may be sent.
+          -- RPC may be issued.
           total `shouldBe` 0
         Left err -> fail $ "Error: " <> show err
 
-    it "still deletes the meeting when the join code is already gone (no emails)" $ do
+    it "still deletes the meeting when the join code is already gone (no cancel RPC)" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
         CodeStore.deleteMeetingCode (qUnqualified meeting.meeting.id)
         deleted <- deleteMeeting zUser1 testConnId meeting.meeting.id
-        total <- totalEmails
-        pure (deleted, total)
+        rpcs <- sentRpcs
+        pure (deleted, rpcs)
       case result of
-        Right (deleted, total) -> do
+        Right (deleted, rpcs) -> do
           -- Deletion succeeds despite the missing code: email preparation is
           -- best-effort and must not fail the meeting operation.
           deleted `shouldBe` True
-          -- Only the invitation from create; no cancellation email.
-          total `shouldBe` 1
+          -- Only the invitation from create; no cancellation RPC.
+          length rpcs `shouldBe` 1
         Left err -> fail $ "Error: " <> show err
 
-    it "sends emails and paywalls join links independently of each other's flags" $ do
+    it "sends RPCs and paywalls join links independently of each other\'s flags" $ do
       let emailsOnlyLicense = fullLicense {meetings = (meetings fullLicense) {invitationLinks = False}}
       result <- runTestStackWithURI now0 gen0 (Left testCodeURIBase) Map.empty def emailsOnlyLicense $ do
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
         code <- meetingCode (qUnqualified meeting.meeting.id)
         joinResult <- joinMeeting zUser2 testConnId (Domain "wire.com") code.codeKey code.codeValue Nothing
-        mails <- sentTo addrA
-        pure (joinResult, mails)
+        rpcs <- sentRpcs
+        pure (joinResult, rpcs)
       case result of
-        Right (Right (joinResult, mails)) -> do
+        Right (Right (joinResult, rpcs)) -> do
           joinResult `shouldBe` JoinMeetingPaywall
-          contents mails `shouldBe` [MeetingInvitationMail "Alice Host" hostEmail (meetingForMailIn mails)]
+          case rpcs of
+            [rpc] -> rpc.kind `shouldBe` MeetingEmailInvitation
+            _ -> expectationFailure "expected exactly one invitation RPC"
+        Right (Left err) -> fail $ "Error: " <> show err
+        Left _denied -> expectationFailure "unexpected CheckDeleteLocalConversation denial"
+
+    it "leaves the meeting operation successful when the SendMeetingEmails RPC fails" $ do
+      result <- runTestStackWithURICfg now0 gen0 (Left testCodeURIBase) Map.empty def fullLicense (MeetingSystemConfig {legacyTimeZone = API.defaultLegacyTimeZone, validityPeriod = 3600, pastEditPeriod = configuredPastEditPeriod, emailsEnabled = True}) $ do
+        plantHost uid1 (Just hostEmail) hostLocale
+        put (FailSendMeetingEmails True)
+        created <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
+        deleted <- deleteMeeting zUser1 testConnId created.meeting.id
+        pure (created, deleted)
+      case result of
+        Right (Right (_created, deleted)) ->
+          -- The failing dispatch is swallowed (warn-logged in a detached
+          -- child): both operations return normally.
+          deleted `shouldBe` True
         Right (Left err) -> fail $ "Error: " <> show err
         Left _denied -> expectationFailure "unexpected CheckDeleteLocalConversation denial"
 
@@ -3177,20 +3220,30 @@ plantHost uid email loc = do
   u <- liftIO (mkHostUser uid "Alice Host" email loc)
   modify (Map.insert uid u)
 
-sentTo :: EmailAddress -> Sem TestStack [SentMail]
-sentTo = getEmailsSentTo
+-- | All recorded @SendMeetingEmails@ RPCs, in dispatch order. Polls until the
+-- recorder is stable (three consecutive identical reads, 50 ms apart): the
+-- dispatch runs in a detached async child, so a bare read races the child.
+sentRpcs :: Sem TestStack [SendMeetingEmails]
+sentRpcs = go Nothing (0 :: Int) (0 :: Int)
+  where
+    go prev stable iters
+      | iters > 100 = reverseCurrent
+      | otherwise = do
+          rpcs <- readRpcs
+          if Just rpcs == prev && stable >= 3
+            then pure rpcs
+            else do
+              embed (threadDelay 50000)
+              go (Just rpcs) (if Just rpcs == prev then stable + 1 else 0) (iters + 1)
+      where
+        reverseCurrent = readRpcs
+    readRpcs = do
+      ref <- get @(IORef [SendMeetingEmails])
+      embed (reverse <$> readIORef ref)
 
-totalEmails :: Sem TestStack Int
-totalEmails = gets @(Map EmailAddress [SentMail]) (sum . map length . Map.elems)
-
-contents :: [SentMail] -> [SentMailContent]
-contents = map (.content)
-
--- | The 'API.Meeting' carried by the first mail sent to the address.
-meetingForMailIn :: [SentMail] -> API.Meeting
-meetingForMailIn mails = case map (.content) mails of
-  (MeetingInvitationMail _ _ m : _) -> m
-  _ -> error "meetingForMailIn: no invitation mail found"
+-- | Total number of (address, RPC) deliveries issued to brig.
+totalRecipients :: Sem TestStack Int
+totalRecipients = sum . map (length . (.recipients)) <$> sentRpcs
 
 -- | Synchronize with 'Wire.MeetingsSubsystem.Interpreter.startTimeTolerance'
 expectedStartTimeTolerance :: NominalDiffTime

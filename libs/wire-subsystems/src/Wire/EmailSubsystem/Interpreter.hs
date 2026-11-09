@@ -61,8 +61,10 @@ emailSubsystemInterpreter ::
   (Member EmailSending r, Member TinyLog r) =>
   EmailTemplates ->
   Branding ->
+  -- | Reply-To for meeting emails.
+  Maybe EmailAddress ->
   InterpreterFor EmailSubsystem r
-emailSubsystemInterpreter EmailTemplates {userTemplates = userTpls, teamTemplates = teamTpls, meetingTemplates = meetingTpls} branding = interpret \case
+emailSubsystemInterpreter EmailTemplates {userTemplates = userTpls, teamTemplates = teamTpls, meetingTemplates = meetingTpls} branding meetingReplyTo = interpret \case
   SendPasswordResetMail email (key, code) mLocale -> sendPasswordResetMailImpl userTpls branding email key code mLocale
   SendVerificationMail email key code mLocale -> sendVerificationMailImpl userTpls branding email key code mLocale
   SendTeamDeletionVerificationMail email code mLocale -> sendTeamDeletionVerificationMailImpl userTpls branding email code mLocale
@@ -80,30 +82,11 @@ emailSubsystemInterpreter EmailTemplates {userTemplates = userTpls, teamTemplate
   SendSAMLIdPChanged email tid mbUid addedCerts removedCerts idPId oldIssuer oldEndpoint newIssuer newEndpoint mLocale ->
     sendSAMLIdPChangedImpl teamTpls branding email tid mbUid addedCerts removedCerts idPId oldIssuer oldEndpoint newIssuer newEndpoint mLocale
   SendMeetingInvitationEmail email hostName hostEmail meeting mLocale ->
-    sendMeetingInvitationMailImpl meetingTpls branding Nothing email hostName hostEmail meeting mLocale
+    sendMeetingInvitationMailImpl meetingTpls branding meetingReplyTo email hostName hostEmail meeting mLocale
   SendMeetingUpdateEmail email hostName hostEmail meeting changeSummary mLocale ->
-    sendMeetingUpdateMailImpl meetingTpls branding Nothing email hostName hostEmail meeting changeSummary mLocale
+    sendMeetingUpdateMailImpl meetingTpls branding meetingReplyTo email hostName hostEmail meeting changeSummary mLocale
   SendMeetingCancelEmail email hostName hostEmail meeting mLocale ->
-    sendMeetingCancelMailImpl meetingTpls branding Nothing email hostName hostEmail meeting mLocale
-
--- | Interpreter for services that send only meeting emails (galley): the
--- three meeting operations delegate to the shared render+send
--- implementations; any other operation is a programming error.
-meetingEmailSubsystemInterpreter ::
-  (Member EmailSending r, Member TinyLog r) =>
-  Localised MeetingTemplates ->
-  Map Text Text ->
-  -- | Optional Reply-To address for meeting emails.
-  Maybe EmailAddress ->
-  InterpreterFor EmailSubsystem r
-meetingEmailSubsystemInterpreter meetingTpls branding replyTo = interpret \case
-  SendMeetingInvitationEmail email hostName hostEmail meeting mLocale ->
-    sendMeetingInvitationMailImpl meetingTpls branding replyTo email hostName hostEmail meeting mLocale
-  SendMeetingUpdateEmail email hostName hostEmail meeting changeSummary mLocale ->
-    sendMeetingUpdateMailImpl meetingTpls branding replyTo email hostName hostEmail meeting changeSummary mLocale
-  SendMeetingCancelEmail email hostName hostEmail meeting mLocale ->
-    sendMeetingCancelMailImpl meetingTpls branding replyTo email hostName hostEmail meeting mLocale
-  _ -> error "meetingEmailSubsystemInterpreter: unsupported email operation"
+    sendMeetingCancelMailImpl meetingTpls branding meetingReplyTo email hostName hostEmail meeting mLocale
 
 -------------------------------------------------------------------------------
 -- Verification Email for

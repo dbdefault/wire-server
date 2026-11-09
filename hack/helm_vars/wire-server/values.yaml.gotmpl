@@ -163,6 +163,8 @@ brig:
       general:
         emailSender: backend-integrationk8s@wire.com
         smsSender: dummy
+        meeting:
+          replyTo: meetings-reply@integration.example.com
       user:
         activationUrl: https://example.com/verify/?key=${key}&code=${code}
         smsActivationUrl: https://example.com/v/${code}
@@ -329,10 +331,7 @@ galley:
         validityPeriod: "5s"
         legacyTimeZone: "Europe/Berlin"
         pastEditPeriod: "5s"
-        # Meeting emails are intentionally NOT enabled here: the galley image
-        # does not ship the email template tree, and a configured templateDir
-        # that cannot be read fails galley at startup. Enable once templates
-        # are mounted into the image (settings.meetings.email).
+        emailsEnabled: true
 
       # These values are insecure, against anyone getting hold of the hash,
       # but its not a concern for the integration tests.

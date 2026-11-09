@@ -125,32 +125,7 @@ data:
         {{- if .pastEditPeriod }}
         pastEditPeriod: {{ .pastEditPeriod }}
         {{- end }}
-        {{- with .email }}
-        email:
-          from: {{ required "Missing value: galley.config.settings.meetings.email.from" .from | quote }}
-          {{- if .replyTo }}
-          replyTo: {{ .replyTo | quote }}
-          {{- end }}
-          templateDir: {{ required "Missing value: galley.config.settings.meetings.email.templateDir" .templateDir | quote }}
-          {{- if .branding }}
-          branding: {{ toYaml .branding | nindent 12 }}
-          {{- end }}
-          transport:
-          {{- if .sesQueue }}
-            sesQueue: {{ required "Missing value: galley.config.settings.meetings.email.sesQueue" .sesQueue }}
-            sesEndpoint: {{ required "Missing value: galley.config.settings.meetings.email.sesEndpoint" .sesEndpoint | quote }}
-          {{- else }}
-            smtpEndpoint:
-              host: {{ .smtp.host }}
-              port: {{ .smtp.port }}
-            smtpConnType: {{ .smtp.connType }}
-            {{- if .smtp.username }}
-            smtpCredentials:
-              smtpUsername: {{ .smtp.username }}
-              smtpPassword: {{ .smtp.passwordFile }}
-            {{- end }}
-          {{- end }}
-        {{- end }}
+        emailsEnabled: {{ .emailsEnabled | default false }}
         {{- end }}
       featureFlags:
         sso: {{ .settings.featureFlags.sso }}

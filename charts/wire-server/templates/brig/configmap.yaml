@@ -160,6 +160,10 @@ data:
           forgot: {{ .forgot }}
           support: {{ .support }}
           {{- end }}
+        {{- if .emailSMS.general.meeting }}
+        meeting:
+          replyTo: {{ required "Missing value: brig.emailSMS.general.meeting.replyTo" .emailSMS.general.meeting.replyTo | quote }}
+        {{- end }}
 
       user:
       {{- if .emailSMS.user }}

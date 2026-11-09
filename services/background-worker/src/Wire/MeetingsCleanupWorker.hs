@@ -35,7 +35,6 @@ import Wire.API.Meeting (defaultLegacyTimeZone)
 import Wire.BackgroundWorker.Env (AppT, Env (..), MeetingsCleanupMetrics (..))
 import Wire.BrigAPIAccess (errorBrigAPIAccess)
 import Wire.Effects
-import Wire.EmailSubsystem (discardEmailSubsystem)
 import Wire.ExternalAccess.External
 import Wire.Licensing.Interpreter (runLicense)
 import Wire.Licensing.License qualified as Licensing
@@ -111,7 +110,6 @@ runMeetingsCleanup env cutoffTime validityPeriod batchSize = do
     -- Cleanup never runs user-facing meeting operations, so brig access and
     -- email sending are unavailable by construction.
     . errorBrigAPIAccess
-    . discardEmailSubsystem
     -- Cleanup performs no meeting updates, so the past-edit period is
     -- unused; pass 0 to keep the (inert) limit as tight as possible.
     -- Cleanup never sends 'getLicense', so the licensing gate never fires;

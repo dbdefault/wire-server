@@ -21,7 +21,6 @@ import Data.Map qualified as Map
 import Imports
 import Polysemy
 import Polysemy.State
-import Wire.API.Meeting qualified as API
 import Wire.API.User
 import Wire.EmailSubsystem
 
@@ -31,29 +30,34 @@ data SentMail = SentMail
   }
   deriving (Show, Eq)
 
-data SentMailContent
-  = PasswordResetMail PasswordResetPair
-  | -- | hostName, hostEmail, meeting
-    MeetingInvitationMail Text EmailAddress API.Meeting
-  | -- | hostName, hostEmail, meeting, changeSummary
-    MeetingUpdateMail Text EmailAddress API.Meeting Text
-  | -- | hostName, hostEmail, meeting
-    MeetingCancelMail Text EmailAddress API.Meeting
+data SentMailContent = PasswordResetMail PasswordResetPair
   deriving (Show, Eq)
 
 inMemoryEmailSubsystemInterpreter :: (Member (State (Map EmailAddress [SentMail])) r) => InterpreterFor EmailSubsystem r
 inMemoryEmailSubsystemInterpreter = interpret \case
-  SendPasswordResetMail email keyCodePair mLocale ->
-    -- Historical convention: newest first. Meeting mails below append
-    -- (chronological), which the meeting-email spec assertions rely on.
-    modify $ Map.insertWith (<>) email [SentMail mLocale $ PasswordResetMail keyCodePair]
-  SendMeetingInvitationEmail email hostName hostEmail meeting mLocale ->
-    modify $ Map.insertWith (flip (<>)) email [SentMail mLocale $ MeetingInvitationMail hostName hostEmail meeting]
-  SendMeetingUpdateEmail email hostName hostEmail meeting changeSummary mLocale ->
-    modify $ Map.insertWith (flip (<>)) email [SentMail mLocale $ MeetingUpdateMail hostName hostEmail meeting changeSummary]
-  SendMeetingCancelEmail email hostName hostEmail meeting mLocale ->
-    modify $ Map.insertWith (flip (<>)) email [SentMail mLocale $ MeetingCancelMail hostName hostEmail meeting]
+  SendPasswordResetMail email keyCodePair mLocale -> modify $ Map.insertWith (<>) email [SentMail mLocale $ PasswordResetMail keyCodePair]
   _ -> error "inMemoryEmailSubsystemInterpreter: implement on demand"
 
 getEmailsSentTo :: (Member (State (Map EmailAddress [SentMail])) r) => EmailAddress -> Sem r [SentMail]
 getEmailsSentTo email = gets $ Map.findWithDefault [] email
+
+noopEmailSubsystemInterpreter :: InterpreterFor EmailSubsystem r
+noopEmailSubsystemInterpreter = interpret \case
+  SendPasswordResetMail {} -> pure ()
+  SendVerificationMail {} -> pure ()
+  SendCreateScimTokenVerificationMail {} -> pure ()
+  SendLoginVerificationMail {} -> pure ()
+  SendActivationMail {} -> pure ()
+  SendEmailAddressUpdateMail {} -> pure ()
+  SendNewClientEmail {} -> pure ()
+  SendAccountDeletionEmail {} -> pure ()
+  SendTeamActivationMail {} -> pure ()
+  SendTeamDeletionVerificationMail {} -> pure ()
+  SendTeamInvitationMail {} -> pure ""
+  SendTeamInvitationMailPersonalUser {} -> pure ""
+  SendMemberWelcomeEmail {} -> pure ()
+  SendNewTeamOwnerWelcomeEmail {} -> pure ()
+  SendSAMLIdPChanged {} -> pure ()
+  SendMeetingInvitationEmail {} -> pure ()
+  SendMeetingUpdateEmail {} -> pure ()
+  SendMeetingCancelEmail {} -> pure ()
