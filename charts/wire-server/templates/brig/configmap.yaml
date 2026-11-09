@@ -160,9 +160,11 @@ data:
           forgot: {{ .forgot }}
           support: {{ .support }}
           {{- end }}
-        {{- if .emailSMS.general.meeting }}
+        {{- $legacyReplyTo := dig "config" "settings" "meetings" "email" "replyTo" "" $.Values.galley }}
+        {{- $meetingReplyTo := dig "emailSMS" "general" "meeting" "replyTo" "" . | default $legacyReplyTo }}
+        {{- with $meetingReplyTo }}
         meeting:
-          replyTo: {{ required "Missing value: brig.emailSMS.general.meeting.replyTo" .emailSMS.general.meeting.replyTo | quote }}
+          replyTo: {{ . | quote }}
         {{- end }}
 
       user:

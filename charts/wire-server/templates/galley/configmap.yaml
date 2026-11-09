@@ -125,7 +125,8 @@ data:
         {{- if .pastEditPeriod }}
         pastEditPeriod: {{ .pastEditPeriod }}
         {{- end }}
-        emailsEnabled: {{ .emailsEnabled | default false }}
+        {{- $legacyEmail := dig "config" "settings" "meetings" "email" (dict) $.Values.galley }}
+        emailsEnabled: {{ or .emailsEnabled (not (empty $legacyEmail)) }}
         {{- end }}
       featureFlags:
         sso: {{ .settings.featureFlags.sso }}

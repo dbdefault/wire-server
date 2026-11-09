@@ -17,6 +17,7 @@
 
 module Wire.MeetingsSubsystem.InterpreterSpec (spec) where
 
+import Control.Exception (throwIO)
 import Data.Aeson (Result (..), Value (Object), fromJSON)
 import Data.ByteString.Char8 qualified as C
 import Data.Code (Key, Timeout (..))
@@ -24,6 +25,7 @@ import Data.Default (def)
 import Data.Domain (Domain (..))
 import Data.IP (IP)
 import Data.Id
+import Data.LanguageCodes (ISO639_1 (DE))
 import Data.LegalHold (UserLegalHoldStatus (..))
 import Data.Map qualified as Map
 import Data.Misc (HttpsUrl (..), IpAddr (..), plainTextPassword8Unsafe)
@@ -275,10 +277,14 @@ extractMeetingEvents pushes =
 -- resolution) and 'SendMeetingEmails' (recorded into an 'IORef', since the
 -- dispatch runs in a detached async child whose pure state writes are lost).
 -- Every other operation is a programming error. The 'Bool' knob makes
--- 'GetUsers' throw an 'RpcException' the way the RPC interpreter does on a
--- failing brig call; the 'FailSendMeetingEmails' knob does the same for
--- 'SendMeetingEmails'. Knobs must be set before the operation that forks
--- the child: the child sees a snapshot of the pure state at fork time.
+-- 'GetUsers' throw an untyped 'RpcException' IO exception, exactly the way
+-- "Wire.Rpc" surfaces a failing brig call (@runHttpRpc@ runs via 'embed',
+-- so non-2xx responses and transport failures are IO exceptions);
+-- the 'FailSendMeetingEmails' knob does the same for 'SendMeetingEmails'
+-- (typed, as the real brig interpreter raises it). The 'FailSendMeetingEmails'
+-- knob must be set before the operation that forks the child: the child sees
+-- a snapshot of the pure state at fork time; the 'GetUsers' knob is read
+-- synchronously, so timing does not matter for it.
 mockBrigAPIAccess ::
   ( Member (State (Map UserId User)) r,
     Member (State Bool) r,
@@ -291,8 +297,8 @@ mockBrigAPIAccess ::
 mockBrigAPIAccess = interpret \case
   BrigAPIAccess.GetUsers uids -> do
     failing <- get @Bool
-    when failing $
-      throw (RpcExceptionInternal {service = "brig", status = 502, message = "mock: host profile lookup failed"})
+    when failing . embed $
+      throwIO (RpcExceptionInternal {service = "brig", status = 502, message = "mock: host profile lookup failed"})
     gets (Map.elems . (`Map.restrictKeys` Set.fromList uids))
   BrigAPIAccess.SendMeetingEmails payload -> do
     FailSendMeetingEmails failing <- get @FailSendMeetingEmails
@@ -1856,7 +1862,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
 
       result <- runTestStack now gen Map.empty teamConfig $ do
         meeting <- createMeeting zUser1 (ConnId "test-conn") newMeeting
-        success <- addInvitedEmails zUser1 meeting.meeting.id [email1, email2]
+        success <- addInvitedEmails zUser1 meeting.meeting.id [email1, email2] Nothing
         fetched <- getMeeting zUser1 meeting.meeting.id
         pure (success, fetched)
 
@@ -1883,7 +1889,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
       result <- runTestStack now gen Map.empty teamConfig $ do
         meeting <- createMeeting zUser1 (ConnId "test-conn") newMeeting
         passTime validityWindow
-        addInvitedEmails zUser1 meeting.meeting.id [email1]
+        addInvitedEmails zUser1 meeting.meeting.id [email1] Nothing
 
       result `shouldBe` Right False
 
@@ -1902,7 +1908,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
 
       result <- runTestStack now gen (Map.singleton teamId [teamMember1, teamMember2]) teamConfig $ do
         meeting <- createMeeting zUser1 (ConnId "test-conn") newMeeting
-        addInvitedEmails zUser2 meeting.meeting.id [email1]
+        addInvitedEmails zUser2 meeting.meeting.id [email1] Nothing
 
       result `shouldBe` Right False
 
@@ -1911,7 +1917,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
 
       result <-
         runTestStack now gen Map.empty teamConfig $
-          addInvitedEmails zUser1 nonExistentId [email1]
+          addInvitedEmails zUser1 nonExistentId [email1] Nothing
 
       result `shouldBe` Right False
 
@@ -2088,7 +2094,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
 
       result <- runTestStack now gen Map.empty teamConfig $ do
         meeting <- createMeeting zUser1 (ConnId "test-conn") newMeeting
-        success <- replaceInvitedEmails zUser1 meeting.meeting.id [email3]
+        success <- replaceInvitedEmails zUser1 meeting.meeting.id [email3] Nothing
         fetched <- getMeeting zUser1 meeting.meeting.id
         pure (success, fetched)
 
@@ -2114,7 +2120,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
 
       result <- runTestStack now gen Map.empty teamConfig $ do
         meeting <- createMeeting zUser1 (ConnId "test-conn") newMeeting
-        success <- replaceInvitedEmails zUser1 meeting.meeting.id []
+        success <- replaceInvitedEmails zUser1 meeting.meeting.id [] Nothing
         fetched <- getMeeting zUser1 meeting.meeting.id
         pure (success, fetched)
 
@@ -2140,7 +2146,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
 
       result <- runTestStack now gen Map.empty teamConfig $ do
         meeting <- createMeeting zUser1 (ConnId "test-conn") newMeeting
-        success <- replaceInvitedEmails zUser1 meeting.meeting.id [email3, email3, email1]
+        success <- replaceInvitedEmails zUser1 meeting.meeting.id [email3, email3, email1] Nothing
         fetched <- getMeeting zUser1 meeting.meeting.id
         pure (success, fetched)
 
@@ -2167,7 +2173,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
       result <- runTestStack now gen Map.empty teamConfig $ do
         meeting <- createMeeting zUser1 (ConnId "test-conn") newMeeting
         passTime validityWindow
-        replaceInvitedEmails zUser1 meeting.meeting.id [email2]
+        replaceInvitedEmails zUser1 meeting.meeting.id [email2] Nothing
 
       result `shouldBe` Right False
 
@@ -2186,7 +2192,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
 
       result <- runTestStack now gen (Map.singleton teamId [teamMember1, teamMember2]) teamConfig $ do
         meeting <- createMeeting zUser1 (ConnId "test-conn") newMeeting
-        replaceInvitedEmails zUser2 meeting.meeting.id [email3]
+        replaceInvitedEmails zUser2 meeting.meeting.id [email3] Nothing
 
       result `shouldBe` Right False
 
@@ -2195,7 +2201,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
 
       result <-
         runTestStack now gen Map.empty teamConfig $
-          replaceInvitedEmails zUser1 nonExistentId [email1]
+          replaceInvitedEmails zUser1 nonExistentId [email1] Nothing
 
       result `shouldBe` Right False
 
@@ -2286,7 +2292,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
         runTestStack now gen Map.empty teamConfig $ do
           meeting <- createMeeting zUser (ConnId "test-conn") (futureMeeting boundedRecurrence)
           passTime validityWindow
-          addInvitedEmails zUser meeting.meeting.id [unsafeEmailAddress "user" "example.com"]
+          addInvitedEmails zUser meeting.meeting.id [unsafeEmailAddress "user" "example.com"] Nothing
       result `shouldBe` Right True
 
     it "deleteMeeting succeeds on a recurring meeting whose slot passed" $ do
@@ -2310,7 +2316,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
         runTestStack now gen Map.empty teamConfig $ do
           meeting <- createMeeting zUser (ConnId "test-conn") (futureMeeting boundedRecurrence)
           passTime validityWindow
-          replaceInvitedEmails zUser meeting.meeting.id [unsafeEmailAddress "user" "example.com"]
+          replaceInvitedEmails zUser meeting.meeting.id [unsafeEmailAddress "user" "example.com"] Nothing
       result `shouldBe` Right True
 
     it "getMeeting returns an open-ended recurring meeting indefinitely" $ do
@@ -2518,7 +2524,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
         Right meeting -> do
           result2 <-
             runTestStack now gen (Map.singleton teamId [teamMember]) meetingsDisabled $
-              addInvitedEmails zUserTeam meeting.meeting.id [unsafeEmailAddress "test" "example.com"]
+              addInvitedEmails zUserTeam meeting.meeting.id [unsafeEmailAddress "test" "example.com"] Nothing
 
           result2 `shouldBe` Left MeetingsFeatureDisabled
 
@@ -2546,7 +2552,7 @@ spec = describe "MeetingsSubsystem.Interpreter" $ do
         Right meeting -> do
           result2 <-
             runTestStack now gen (Map.singleton teamId [teamMember]) meetingsDisabled $
-              replaceInvitedEmails zUserTeam meeting.meeting.id [unsafeEmailAddress "test" "example.com"]
+              replaceInvitedEmails zUserTeam meeting.meeting.id [unsafeEmailAddress "test" "example.com"] Nothing
 
           result2 `shouldBe` Left MeetingsFeatureDisabled
 
@@ -3055,8 +3061,8 @@ specMeetingEmails =
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
-        _ <- addInvitedEmails zUser1 meeting.meeting.id [addrB, addrC]
-        _ <- replaceInvitedEmails zUser1 meeting.meeting.id [addrC, addrD]
+        _ <- addInvitedEmails zUser1 meeting.meeting.id [addrB, addrC] Nothing
+        _ <- replaceInvitedEmails zUser1 meeting.meeting.id [addrC, addrD] Nothing
         _ <- removeInvitedEmails zUser1 meeting.meeting.id [addrD]
         rpcs <- sentRpcs
         pure (rpcs, meeting.meeting)
@@ -3070,11 +3076,38 @@ specMeetingEmails =
           all (\rpc -> rpc.kind == MeetingEmailInvitation) rpcs `shouldBe` True
           all (\rpc -> rpc.meeting.id == m.id) rpcs `shouldBe` True
 
+    it "uses the caller-provided locale for invitation emails" $ do
+      let customLocale = Locale (Language DE) Nothing
+      result <- runTestStack now0 gen0 Map.empty def $ do
+        plantHost uid1 (Just hostEmail) hostLocale
+        meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
+        _ <- addInvitedEmails zUser1 meeting.meeting.id [addrB] (Just customLocale)
+        rpcs <- sentRpcs
+        pure rpcs
+      case result of
+        Left err -> fail $ "Error: " <> show err
+        Right rpcs -> case drop 1 rpcs of
+          [rpc] -> rpc.locale `shouldBe` Just customLocale
+          _ -> expectationFailure "expected exactly one invitation RPC after create"
+
+    it "falls back to the creator's locale when the request carries none" $ do
+      result <- runTestStack now0 gen0 Map.empty def $ do
+        plantHost uid1 (Just hostEmail) hostLocale
+        meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
+        _ <- addInvitedEmails zUser1 meeting.meeting.id [addrB] Nothing
+        rpcs <- sentRpcs
+        pure rpcs
+      case result of
+        Left err -> fail $ "Error: " <> show err
+        Right rpcs -> case drop 1 rpcs of
+          [rpc] -> rpc.locale `shouldBe` Just hostLocale
+          _ -> expectationFailure "expected exactly one invitation RPC after create"
+
     it "does not re-invite an address that is already invited (add)" $ do
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
-        _ <- addInvitedEmails zUser1 meeting.meeting.id [addrA, addrB]
+        _ <- addInvitedEmails zUser1 meeting.meeting.id [addrA, addrB] Nothing
         rpcs <- sentRpcs
         pure (rpcs, meeting.meeting)
       case result of
@@ -3181,7 +3214,7 @@ specMeetingEmails =
           length rpcs `shouldBe` 1
         Left err -> fail $ "Error: " <> show err
 
-    it "sends RPCs and paywalls join links independently of each other\'s flags" $ do
+    it "sends RPCs and gates join links independently of each other\'s flags" $ do
       let emailsOnlyLicense = fullLicense {meetings = (meetings fullLicense) {invitationLinks = False}}
       result <- runTestStackWithURI now0 gen0 (Left testCodeURIBase) Map.empty def emailsOnlyLicense $ do
         plantHost uid1 (Just hostEmail) hostLocale
@@ -3192,7 +3225,7 @@ specMeetingEmails =
         pure (joinResult, rpcs)
       case result of
         Right (Right (joinResult, rpcs)) -> do
-          joinResult `shouldBe` JoinMeetingPaywall
+          joinResult `shouldBe` Left MeetingNotLicensed
           case rpcs of
             [rpc] -> rpc.kind `shouldBe` MeetingEmailInvitation
             _ -> expectationFailure "expected exactly one invitation RPC"
