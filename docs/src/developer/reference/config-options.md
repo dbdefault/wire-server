@@ -2403,6 +2403,13 @@ place and the store fails at runtime. In that case drop or rename the stale
 tables (after backing up any still-needed rows) so the migration can create
 them with the expected schema.
 
+The galley-side `user_client_index` table is new (no legacy shape), but it can
+accumulate stale rows for clients deleted during the copy window (the
+Cassandra source carries no per-entry tombstones). brig's `clients` table is
+the authoritative client inventory after the cutover, so a stale index can be
+rebuilt from it at any time:
+`DELETE FROM user_client_index; INSERT INTO user_client_index SELECT user_id, client_id FROM clients;`
+
 **Migration pattern per migration setting**
 
 1. Prepare the selected migration setting(s) for migration by setting
