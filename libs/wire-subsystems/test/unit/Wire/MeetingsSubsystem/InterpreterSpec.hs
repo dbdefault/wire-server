@@ -44,6 +44,7 @@ import Polysemy.Error
 import Polysemy.Input
 import Polysemy.State
 import Polysemy.TinyLog (TinyLog)
+import System.IO.Error (userError)
 import System.Random (StdGen, mkStdGen)
 import Test.Hspec
 import Test.Hspec.QuickCheck (prop)
@@ -129,6 +130,7 @@ type TestStack =
      State (Map UserId User),
      State Bool,
      State FailSendMeetingEmails,
+     State FailSendMeetingEmailsIO,
      State (IORef [SendMeetingEmails]),
      Embed IO,
      Final IO
@@ -215,6 +217,7 @@ runTestStackWithURICfg now gen convCodeURI teams configs lic cfg sem = do
   runFinal @IO
     . embedToFinal @IO
     . evalState rpcRef
+    . evalState (FailSendMeetingEmailsIO False)
     . evalState (FailSendMeetingEmails False)
     . evalState False
     . evalState (Map.empty :: Map UserId User)
@@ -289,6 +292,7 @@ mockBrigAPIAccess ::
   ( Member (State (Map UserId User)) r,
     Member (State Bool) r,
     Member (State FailSendMeetingEmails) r,
+    Member (State FailSendMeetingEmailsIO) r,
     Member (State (IORef [SendMeetingEmails])) r,
     Member (Embed IO) r,
     Member (Error RpcException) r
@@ -304,6 +308,9 @@ mockBrigAPIAccess = interpret \case
     FailSendMeetingEmails failing <- get @FailSendMeetingEmails
     when failing $
       throw (RpcExceptionInternal {service = "brig", status = 502, message = "mock: send meeting emails failed"})
+    FailSendMeetingEmailsIO failingIO <- get @FailSendMeetingEmailsIO
+    when failingIO . void . embed $
+      throwIO (userError "mock: brig unreachable")
     ref <- get @(IORef [SendMeetingEmails])
     embed $ atomicModifyIORef' ref (\ps -> (payload : ps, ()))
   _ -> error "mockBrigAPIAccess: unimplemented operation"
@@ -311,6 +318,13 @@ mockBrigAPIAccess = interpret \case
 -- | Set via 'State FailSendMeetingEmails'; makes the mock's
 -- 'SendMeetingEmails' handler throw an 'RpcException' (failing brig RPC).
 newtype FailSendMeetingEmails = FailSendMeetingEmails Bool
+  deriving stock (Eq, Show)
+
+-- | Set via 'State FailSendMeetingEmailsIO'; makes the mock's
+-- 'SendMeetingEmails' handler throw a raw IO exception (brig entirely
+-- unreachable). Must be set before the operation that forks the child: the
+-- child sees a snapshot of the pure state at fork time.
+newtype FailSendMeetingEmailsIO = FailSendMeetingEmailsIO Bool
   deriving stock (Eq, Show)
 
 -- | A brig user record for the meeting host (creator) with the given name,
@@ -3107,7 +3121,7 @@ specMeetingEmails =
       result <- runTestStack now0 gen0 Map.empty def $ do
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
-        _ <- addInvitedEmails zUser1 meeting.meeting.id [addrA, addrB] Nothing
+        _ <- addInvitedEmails zUser1 meeting.meeting.id [addrA, addrA, addrB] Nothing
         rpcs <- sentRpcs
         pure (rpcs, meeting.meeting)
       case result of
@@ -3220,12 +3234,15 @@ specMeetingEmails =
         plantHost uid1 (Just hostEmail) hostLocale
         meeting <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
         code <- meetingCode (qUnqualified meeting.meeting.id)
-        joinResult <- joinMeeting zUser2 testConnId (Domain "wire.com") code.codeKey code.codeValue Nothing
+        joinOutcome <-
+          catch
+            (Right <$> joinMeeting zUser2 testConnId (Domain "wire.com") code.codeKey code.codeValue Nothing)
+            (pure . Left)
         rpcs <- sentRpcs
-        pure (joinResult, rpcs)
+        pure (joinOutcome, rpcs)
       case result of
-        Right (Right (joinResult, rpcs)) -> do
-          joinResult `shouldBe` Left MeetingNotLicensed
+        Right (Right (joinOutcome, rpcs)) -> do
+          joinOutcome `shouldBe` Left MeetingNotLicensed
           case rpcs of
             [rpc] -> rpc.kind `shouldBe` MeetingEmailInvitation
             _ -> expectationFailure "expected exactly one invitation RPC"
@@ -3244,6 +3261,22 @@ specMeetingEmails =
           -- The failing dispatch is swallowed (warn-logged in a detached
           -- child): both operations return normally.
           deleted `shouldBe` True
+        Right (Left err) -> fail $ "Error: " <> show err
+        Left _denied -> expectationFailure "unexpected CheckDeleteLocalConversation denial"
+
+    it "leaves the meeting operation successful when the dispatch RPC throws an IO exception" $ do
+      -- Pins the meeting-operation outcome: the detached child's raw IO
+      -- exception must not affect createMeeting (the child itself discards
+      -- its result, so pre- and post-fix this succeeds either way; the
+      -- warn-logging of the transport failure is the behavioral change).
+      result <- runTestStackWithURICfg now0 gen0 (Left testCodeURIBase) Map.empty def fullLicense (MeetingSystemConfig {legacyTimeZone = API.defaultLegacyTimeZone, validityPeriod = 3600, pastEditPeriod = configuredPastEditPeriod, emailsEnabled = True}) $ do
+        plantHost uid1 (Just hostEmail) hostLocale
+        -- Set before the fork: the child snapshots the pure state at fork time.
+        put (FailSendMeetingEmailsIO True)
+        created <- createMeeting zUser1 testConnId (mkNewMeeting API.Scheduled [addrA])
+        pure created
+      case result of
+        Right (Right _created) -> pure ()
         Right (Left err) -> fail $ "Error: " <> show err
         Left _denied -> expectationFailure "unexpected CheckDeleteLocalConversation denial"
 

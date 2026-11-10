@@ -973,15 +973,16 @@ prepareMeetingEmails emailsEnabled domain sm recipients
 data MeetingEmailDispatch = DispatchInvitation | DispatchUpdate !Text | DispatchCancel
 
 -- | Dispatch the meeting emails as ONE batch RPC to brig (fire-and-forget):
--- brig renders and transports; a failing typed RPC ('RpcException',
--- 'ParseException') is warn-logged in a detached 'Async' child and never
--- changes the outcome of the meeting operation that triggered it. A
--- transport-level IO exception (brig entirely down) dies silently with the
--- discarded child; accepted residual.
+-- brig renders and transports; typed RPC errors ('RpcException',
+-- 'ParseException') and transport IO exceptions (brig entirely down, thrown
+-- as IO exceptions by "Wire.Rpc") are all warn-logged in a detached 'Async'
+-- child and nothing escapes unhandled — email dispatch never changes the
+-- outcome of the meeting operation that triggered it.
 dispatchMeetingEmails ::
   ( Member BrigAPIAccess r,
     Member Async r,
-    Member TinyLog r
+    Member TinyLog r,
+    Member (Final IO) r
   ) =>
   -- | (hostName, hostEmail, locale, apiMeeting) as produced by 'prepareMeetingEmails'.
   (Text, EmailAddress, Locale, API.Meeting) ->
@@ -1007,13 +1008,18 @@ dispatchMeetingEmails (hostName, hostEmail, loc, mtg) recipients dispatch =
       -- outcome; a dead child (brig down, non-202, parse error) is
       -- warn-logged.
       void . P.async $
-        runError @RpcException (runError @ParseException (BrigAPIAccess.sendMeetingEmails payload)) >>= \case
-          Right (Right ()) -> pure ()
-          _ ->
-            TinyLog.warn $
-              Log.msg ("meeting email dispatch failed" :: ByteString)
-                . Log.field "meetingId" (toByteString' (qUnqualified mtg.id))
-                . Log.field "kind" (show kind)
+        errorToIOFinal @SomeException
+          ( fromExceptionSem @SomeException
+              (runError @RpcException (runError @ParseException (BrigAPIAccess.sendMeetingEmails payload)))
+          )
+          >>= \case
+            Right (Right (Right ())) -> pure ()
+            outcome ->
+              TinyLog.warn $
+                Log.msg ("meeting email dispatch failed" :: ByteString)
+                  . Log.field "meetingId" (toByteString' (qUnqualified mtg.id))
+                  . Log.field "kind" (show kind)
+                  . Log.field "error" (either show (either show (either show show)) outcome)
 
 -- | 'prepareMeetingEmails' followed immediately by 'dispatchMeetingEmails':
 -- the common pairing for lifecycle paths that send emails right away.
@@ -1238,7 +1244,7 @@ addInvitedEmailsImpl zUser meetingId emails mLocale validityPeriod emailsEnabled
       -- already invited get an invitation: re-adding an address is a
       -- no-op for mail. The snapshot is pre-add, which is the correct
       -- baseline for the diff.
-      let newlyAdded = emails \\ storedMeeting.invitedEmails
+      let newlyAdded = dedup emails \\ storedMeeting.invitedEmails
       lift $ sendMeetingEmailsFor emailsEnabled (tDomain zUser) storedMeeting newlyAdded mLocale DispatchInvitation
 
   pure $ isJust result
@@ -1306,7 +1312,7 @@ replaceInvitedEmailsImpl zUser meetingId emails mLocale validityPeriod emailsEna
       lift $ Store.replaceInvitedEmails (qUnqualified meetingId) emails
       -- Only newly-added addresses get an invitation; removed addresses get
       -- no email (removal emails are a separate ticket, WPB-27179).
-      let added = emails \\ storedMeeting.invitedEmails
+      let added = dedup emails \\ storedMeeting.invitedEmails
       lift $ sendMeetingEmailsFor emailsEnabled (tDomain zUser) storedMeeting added mLocale DispatchInvitation
 
   pure $ isJust result

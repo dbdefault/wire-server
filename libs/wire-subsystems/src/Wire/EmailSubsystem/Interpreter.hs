@@ -1,4 +1,6 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeOperators #-}
 
 -- This file is part of the Wire Server implementation.
 --
@@ -39,9 +41,13 @@ import Data.X509.Extended
 import Imports
 import Network.Mail.Mime
 import Polysemy
+import Polysemy.Error (errorToIOFinal, fromExceptionSem)
+import Polysemy.Error qualified
 import Polysemy.Output (Output)
 import Polysemy.TinyLog (TinyLog)
+import Polysemy.TinyLog qualified as Log
 import SAML2.WebSSO
+import System.Logger (field, msg, val)
 import URI.ByteString (URI, serializeURIRef')
 import Wire.API.Locale
 import Wire.API.Meeting (Meeting (..), timeZoneTZ)
@@ -58,7 +64,7 @@ import Wire.EmailSubsystem.Templates.Team
 import Wire.EmailSubsystem.Templates.User
 
 emailSubsystemInterpreter ::
-  (Member EmailSending r, Member TinyLog r) =>
+  (Member EmailSending r, Member TinyLog r, Member (Final IO) r) =>
   EmailTemplates ->
   Branding ->
   -- | Reply-To for meeting emails.
@@ -712,8 +718,31 @@ renderIdPConfigChangeEmail email IdPConfigChangeEmailTemplate {..} branding adde
 -------------------------------------------------------------------------------
 -- Meeting Emails
 
+-- | Meeting email delivery is best-effort: a transport failure for one
+-- recipient must neither fail the remaining recipients of the batch nor
+-- escape the @POST /i/meetings/emails@ handler as an unhandled IO
+-- exception. Warn-log and swallow.
+sendMeetingMailBestEffort ::
+  ( Member TinyLog r,
+    Member (Final IO) r
+  ) =>
+  -- | Email kind for the log line (same label as 'logEmailRenderErrors').
+  Text ->
+  EmailAddress ->
+  Sem (Polysemy.Error.Error SomeException : r) () ->
+  Sem r ()
+sendMeetingMailBestEffort kind recipient action =
+  errorToIOFinal @SomeException (fromExceptionSem @SomeException action) >>= \case
+    Left e ->
+      Log.warn $
+        msg (val "Meeting email delivery failed")
+          . field "email_kind" (val (T.encodeUtf8 kind))
+          . field "recipient" (val (T.encodeUtf8 (fromEmail recipient)))
+          . field "error" (val (T.encodeUtf8 (T.pack (displayException e))))
+    Right () -> pure ()
+
 sendMeetingInvitationMailImpl ::
-  (Member EmailSending r, Member TinyLog r) =>
+  (Member EmailSending r, Member TinyLog r, Member (Final IO) r) =>
   Localised MeetingTemplates ->
   Branding ->
   -- | Optional Reply-To address.
@@ -725,12 +754,13 @@ sendMeetingInvitationMailImpl ::
   Maybe Locale ->
   Sem r ()
 sendMeetingInvitationMailImpl meetingTemplates branding replyTo email hostName hostEmail meeting mLocale = do
-  let tpl = meetingInvitationEmail . snd $ forLocale mLocale meetingTemplates
-  mail <- logEmailRenderErrors "meeting invitation email" $ renderMeetingInvitationEmail email hostName hostEmail meeting tpl branding replyTo
-  sendMail mail
+  let kind = "meeting invitation email"
+      tpl = meetingInvitationEmail . snd $ forLocale mLocale meetingTemplates
+  mail <- logEmailRenderErrors kind $ renderMeetingInvitationEmail email hostName hostEmail meeting tpl branding replyTo
+  sendMeetingMailBestEffort kind email (sendMail mail)
 
 sendMeetingUpdateMailImpl ::
-  (Member EmailSending r, Member TinyLog r) =>
+  (Member EmailSending r, Member TinyLog r, Member (Final IO) r) =>
   Localised MeetingTemplates ->
   Branding ->
   -- | Optional Reply-To address.
@@ -743,12 +773,13 @@ sendMeetingUpdateMailImpl ::
   Maybe Locale ->
   Sem r ()
 sendMeetingUpdateMailImpl meetingTemplates branding replyTo email hostName hostEmail meeting changeSummary mLocale = do
-  let tpl = meetingUpdateEmail . snd $ forLocale mLocale meetingTemplates
-  mail <- logEmailRenderErrors "meeting update email" $ renderMeetingUpdateEmail email hostName hostEmail meeting changeSummary tpl branding replyTo
-  sendMail mail
+  let kind = "meeting update email"
+      tpl = meetingUpdateEmail . snd $ forLocale mLocale meetingTemplates
+  mail <- logEmailRenderErrors kind $ renderMeetingUpdateEmail email hostName hostEmail meeting changeSummary tpl branding replyTo
+  sendMeetingMailBestEffort kind email (sendMail mail)
 
 sendMeetingCancelMailImpl ::
-  (Member EmailSending r, Member TinyLog r) =>
+  (Member EmailSending r, Member TinyLog r, Member (Final IO) r) =>
   Localised MeetingTemplates ->
   Branding ->
   -- | Optional Reply-To address.
@@ -760,9 +791,10 @@ sendMeetingCancelMailImpl ::
   Maybe Locale ->
   Sem r ()
 sendMeetingCancelMailImpl meetingTemplates branding replyTo email hostName hostEmail meeting mLocale = do
-  let tpl = meetingCancelEmail . snd $ forLocale mLocale meetingTemplates
-  mail <- logEmailRenderErrors "meeting cancellation email" $ renderMeetingCancelEmail email hostName hostEmail meeting tpl branding replyTo
-  sendMail mail
+  let kind = "meeting cancellation email"
+      tpl = meetingCancelEmail . snd $ forLocale mLocale meetingTemplates
+  mail <- logEmailRenderErrors kind $ renderMeetingCancelEmail email hostName hostEmail meeting tpl branding replyTo
+  sendMeetingMailBestEffort kind email (sendMail mail)
 
 -- | Replacement map shared by all meeting emails. Branding keys
 -- (brand_*/support/legal/misuse/copyright) come from the branding map itself;
