@@ -110,7 +110,7 @@ import Wire.CodeStore.Postgres
 import Wire.ConversationStore (ConversationStore, MLSCommitLockStore)
 import Wire.ConversationStore.Cassandra (MigrationError (..), interpretConversationStoreByMigration, interpretMLSCommitLockStoreToCassandra)
 import Wire.ConversationSubsystem
-import Wire.ConversationSubsystem.Interpreter (ConversationSubsystemError, GroupInfoCheckEnabled (..), IntraListing (IntraListing), interpretConversationSubsystem)
+import Wire.ConversationSubsystem.Interpreter (ConversationSubsystemError, GroupInfoCheckEnabled (..), GroupInfoRepairEnabled (..), IntraListing (IntraListing), interpretConversationSubsystem)
 import Wire.CustomBackendStore
 import Wire.CustomBackendStore.Cassandra
 import Wire.CustomBackendStore.DualWrite
@@ -200,6 +200,7 @@ import Wire.UserGroupStore.Postgres (interpretUserGroupStoreToPostgres)
 type GalleyEffects =
   '[ MeetingsSubsystem,
      ConversationSubsystem,
+     Input (Maybe GroupInfoRepairEnabled),
      MeetingNotifier,
      JobSubsystem,
      Input RequestId,
@@ -584,6 +585,7 @@ evalGalley e =
         . runInputConst (e ^. reqId)
         . interpretJobSubsystem defaultJobSubsystemConfig
         . interpretMeetingNotifier
+        . runInputConst (GroupInfoRepairEnabled <$> e._options._settings._mlsGroupInfoRepair)
         . interpretConversationSubsystem
         . Meeting.interpretMeetingsSubsystem (meetingSystemConfig (e ^. options))
   where

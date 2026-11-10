@@ -114,6 +114,7 @@ data Env = Env
     guestLinkTTLSeconds :: !(Maybe GuestLinkTTLSeconds),
     passwordHashingOptions :: !PasswordHashingOptions,
     checkGroupInfo :: !(Maybe Bool),
+    mlsGroupInfoRepair :: !(Maybe Bool),
     convCodeURI :: Either HttpsUrl (Map Domain HttpsUrl),
     passwordHashingRateLimitEnv :: RateLimitEnv
   }
@@ -198,6 +199,7 @@ mkEnv opts galleyOpts = do
       guestLinkTTLSeconds = galleyOpts._settings._guestLinkTTLSeconds
       passwordHashingOptions = galleyOpts._settings._passwordHashingOptions
       checkGroupInfo = galleyOpts._settings._checkGroupInfo
+      mlsGroupInfoRepair = galleyOpts._settings._mlsGroupInfoRepair
   workerRunningGauge <- mkWorkerRunningGauge
   hasqlPool <- initPostgresPool opts.postgresqlPool galleyOpts._postgresql galleyOpts._postgresqlPassword
   arbiterConnStr <- mkArbiterConnectionString galleyOpts._postgresql galleyOpts._postgresqlPassword
