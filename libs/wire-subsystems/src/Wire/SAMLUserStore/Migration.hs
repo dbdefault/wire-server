@@ -40,13 +40,14 @@ import Prometheus qualified
 import SAML2.WebSSO qualified as SAML
 import System.Logger qualified as Log
 import UnliftIO qualified
-import {- instance Cql NormalizedUNameID -} Wire.API.User.Saml ()
+import {- instance Cql NormalizedUNameID -} Wire.API.User.Saml (NormalizedUNameID, normalizeQualifiedNameId)
 import {- instance Cql SAML.Issuer -} Wire.IdPConfigStore.Orphans ()
 import Wire.Migration
 import Wire.Postgres
 import Wire.SAMLUserStore.Postgres qualified as Postgres
 import Wire.Sem.Logger (mapLogger)
 import Wire.Sem.Logger.TinyLog (loggerToTinyLog)
+import Wire.Util (embedClient)
 
 type EffectStack =
   [ AtomicState Int,
@@ -122,7 +123,14 @@ migrateAllSAMLUsersV2 migOpts migCounter migDuration = do
     .| C.mapM_
       ( traverse_ $ \(issuer, subject, uid) ->
           handleErrors (encodeUtf8 (rowId uid)) $
-            migrateSAMLUserRow migOpts migCounter migDuration Postgres.upsertSAMLUserRow (SAML.UserRef issuer subject) uid
+            migrateSAMLUserRow
+              migOpts
+              migCounter
+              migDuration
+              probeSAMLUserV2
+              Postgres.upsertSAMLUserRow
+              (SAML.UserRef issuer subject)
+              uid
       )
 
 ----------------------------------------------------------------------
@@ -154,8 +162,43 @@ migrateAllLegacySAMLUsers migOpts migCounter migDuration = do
           handleErrors (encodeUtf8 (rowId uid)) $
             -- user_v2 rows were copied first and are authoritative: a stale
             -- legacy row must never overwrite them, so insert-if-absent.
-            migrateSAMLUserRow migOpts migCounter migDuration Postgres.insertSAMLUserIfAbsent (SAML.UserRef issuer subject) uid
+            migrateSAMLUserRow
+              migOpts
+              migCounter
+              migDuration
+              probeLegacySAMLUser
+              Postgres.insertSAMLUserIfAbsent
+              (SAML.UserRef issuer subject)
+              uid
       )
+
+-- | Liveness probe for the @user_v2@ table (5622 pattern): re-read the row
+-- from Cassandra right before copying it, so a SAML mapping deleted (SSO
+-- unlink) after the page was scanned is skipped instead of resurrected in
+-- Postgres.
+probeSAMLUserV2 :: (Member (Input ClientState) r, Member (Embed IO) r) => SAML.UserRef -> Sem r Bool
+probeSAMLUserV2 (SAML.UserRef tenant subject) = do
+  client <- input @ClientState
+  isJust
+    <$> embedClient
+      client
+      ( retry x1 (query1 probe (params LocalQuorum (tenant, normalizeQualifiedNameId subject)))
+      )
+  where
+    probe :: PrepQuery R (SAML.Issuer, NormalizedUNameID) (Identity UserId)
+    probe = "SELECT uid FROM user_v2 WHERE issuer = ? AND normalized_uname_id = ?"
+
+-- | Liveness probe for the legacy @user@ table (raw @sso_id@ key).
+probeLegacySAMLUser :: (Member (Input ClientState) r, Member (Embed IO) r) => SAML.UserRef -> Sem r Bool
+probeLegacySAMLUser (SAML.UserRef tenant subject) = do
+  client <- input @ClientState
+  isJust
+    <$> embedClient
+      client
+      (retry x1 (query1 probe (params LocalQuorum (tenant, subject))))
+  where
+    probe :: PrepQuery R (SAML.Issuer, SAML.NameID) (Identity UserId)
+    probe = "SELECT uid FROM user WHERE issuer = ? AND sso_id = ?"
 
 rowId :: UserId -> Text
 rowId = UUID.toText . toUUID
@@ -167,16 +210,18 @@ migrateSAMLUserRow ::
   ( PGConstraints r,
     Member TinyLog r,
     Member Resource r,
-    Member Race r
+    Member Race r,
+    Member (Input ClientState) r
   ) =>
   MigrationOptions ->
   Prometheus.Counter ->
   Prometheus.Vector Text Prometheus.Histogram ->
+  (SAML.UserRef -> Sem r Bool) ->
   (SAML.UserRef -> UserId -> Sem r ()) ->
   SAML.UserRef ->
   UserId ->
   Sem r ()
-migrateSAMLUserRow migOpts migCounter migDuration writeRow uref uid = do
+migrateSAMLUserRow migOpts migCounter migDuration probe writeRow uref uid = do
   -- user id: the issuer/NameID are not secrets, but identify rows uniformly by
   -- user id to keep log fields stable.
   let rowIdent = rowId uid
@@ -185,16 +230,23 @@ migrateSAMLUserRow migOpts migCounter migDuration writeRow uref uid = do
     (liftIO getCurrentTime)
     (observeDuration migDuration outcomeRef)
     ( const $ do
-        timeoutResult <-
-          Conc.timeout (migOpts.timeout <$ handleTimeout rowIdent) migOpts.timeout $
-            writeRow uref uid
-        case timeoutResult of
-          Left timedOutAfter -> do
-            markOutcome outcomeRef "timeout"
-            liftIO . UnliftIO.throwIO $ MigrationTimedOut rowIdent timedOutAfter
-          Right () -> do
-            markOutcome outcomeRef "success"
-            liftIO $ Prometheus.incCounter migCounter
+        -- Liveness probe (5622 pattern): the scanned page can be stale, and a
+        -- SAML mapping deleted (SSO unlink) after enumeration must not be
+        -- resurrected in Postgres by the copy.
+        alive <- probe uref
+        if not alive
+          then markOutcome outcomeRef "skipped-deleted"
+          else do
+            timeoutResult <-
+              Conc.timeout (migOpts.timeout <$ handleTimeout rowIdent) migOpts.timeout $
+                writeRow uref uid
+            case timeoutResult of
+              Left timedOutAfter -> do
+                markOutcome outcomeRef "timeout"
+                liftIO . UnliftIO.throwIO $ MigrationTimedOut rowIdent timedOutAfter
+              Right () -> do
+                markOutcome outcomeRef "success"
+                liftIO $ Prometheus.incCounter migCounter
     )
   where
     handleTimeout rowIdent =

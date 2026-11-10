@@ -125,10 +125,7 @@ type LowerLevelCanonicalEffs =
      IdPRawMetadataStore,
      SAMLUserStore,
      Embed Cas.Client,
-<<<<<<< HEAD
      Error MigrationLockError,
-=======
->>>>>>> 6bffaee90 (WPB-22972: migrate scim token and external-id stores to PostGreSQL)
      Error Hasql.UsageError,
      Error IdpDbError,
      Error TTLError,
@@ -167,12 +164,9 @@ runSparToIO ctx =
           MigrationToPostgresql -> interpretScimExternalIdStoreToCassandraAndPostgres
           PostgresqlStorage -> interpretScimExternalIdStoreToPostgres
    in runFinal
-<<<<<<< HEAD
         . resourceToIOFinal
         . asyncToIOFinal
         . interpretRace
-=======
->>>>>>> 6bffaee90 (WPB-22972: migrate scim token and external-id stores to PostGreSQL)
         . embedToFinal @IO
         . nowToIO
         . randomToIO
