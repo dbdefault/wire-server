@@ -47,7 +47,7 @@ testScimUserMetaMigration = do
       bearer <- tokenResponse %. "token" >>= asString
       externalId <- randomExternalId
       scimUser <- randomScimUserWithEmail externalId =<< randomEmail
-      tokenId <- tokenResponse %. "id" >>= asString
+      tokenId <- tokenResponse %. "info" %. "id" >>= asString
       scid <- createScimUser domain bearer scimUser >>= getJSON 201 >>= (%. "id") >>= asString
       _ <- getScimUser domain bearer scid >>= getJSON 200 >>= (%. "meta.created") >>= asString
       pure (owner, bearer, tokenId, scid, externalId)

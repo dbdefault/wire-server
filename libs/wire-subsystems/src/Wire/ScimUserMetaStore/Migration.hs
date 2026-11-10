@@ -138,7 +138,7 @@ migrateScimUserMetaRow migOpts migCounter migDuration (uid, createdAt, lastUpdat
       ( const $ do
           timeoutResult <-
             Conc.timeout (migOpts.timeout <$ handleTimeout) migOpts.timeout $
-              Postgres.upsertScimUserMetaRow uid' createdAt' lastUpdatedAt' emailType emailPrimary
+              Postgres.insertScimUserMetaIfAbsent uid' createdAt' lastUpdatedAt' emailType emailPrimary
           case timeoutResult of
             Left timedOutAfter -> do
               markOutcome outcomeRef "timeout"
