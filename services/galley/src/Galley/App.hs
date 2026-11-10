@@ -190,7 +190,7 @@ import Wire.TeamNotificationStore (TeamNotificationStore)
 import Wire.TeamNotificationStore.Cassandra (interpretTeamNotificationStoreToCassandra)
 import Wire.TeamStore (TeamStore)
 import Wire.TeamStore.Cassandra (interpretTeamStoreToCassandra)
-import Wire.TeamStore.DualWrite (interpretTeamStoreMetadataToCassandraAndPostgres)
+import Wire.TeamStore.DualWrite (interpretTeamStoreToCassandraAndPostgres)
 import Wire.TeamStore.Postgres (interpretTeamStoreMetadataToPostgres)
 import Wire.TeamSubsystem (TeamSubsystem)
 import Wire.TeamSubsystem.Interpreter
@@ -451,7 +451,7 @@ evalGalley e =
       teamStoreInterpreter =
         case (e ^. options . postgresMigration).team of
           CassandraStorage -> interpretTeamStoreToCassandra
-          MigrationToPostgresql -> interpretTeamStoreMetadataToCassandraAndPostgres
+          MigrationToPostgresql -> interpretTeamStoreToCassandraAndPostgres
           PostgresqlStorage -> interpretTeamStoreMetadataToPostgres
       localUnit = toLocalUnsafe (e ^. options . settings . federationDomain) ()
       teamSubsystemConfig =

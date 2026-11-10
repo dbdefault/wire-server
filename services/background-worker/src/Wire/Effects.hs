@@ -135,7 +135,7 @@ import Wire.TeamJournal (TeamJournal)
 import Wire.TeamJournal.Aws (interpretTeamJournal)
 import Wire.TeamStore (TeamStore)
 import Wire.TeamStore.Cassandra (interpretTeamStoreToCassandra)
-import Wire.TeamStore.DualWrite (interpretTeamStoreMetadataToCassandraAndPostgres)
+import Wire.TeamStore.DualWrite (interpretTeamStoreToCassandraAndPostgres)
 import Wire.TeamStore.Postgres (interpretTeamStoreMetadataToPostgres)
 import Wire.TeamSubsystem (TeamSubsystem)
 import Wire.TeamSubsystem.Interpreter (TeamSubsystemConfig (..), interpretTeamSubsystem)
@@ -384,7 +384,7 @@ runBackgroundWorkerEffects env extEnv requestId mJobId =
 
     interpretTeamStore = case env.postgresMigration.team of
       CassandraStorage -> interpretTeamStoreToCassandra
-      MigrationToPostgresql -> interpretTeamStoreMetadataToCassandraAndPostgres
+      MigrationToPostgresql -> interpretTeamStoreToCassandraAndPostgres
       PostgresqlStorage -> interpretTeamStoreMetadataToPostgres
     legalHoldEnv =
       let makeReq fpr url rb = makeVerifiedRequestIO env.logger extEnv fpr url rb
