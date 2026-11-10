@@ -181,10 +181,7 @@ runSparToIO ctx =
         . ttlErrorToSparError
         . idpDbErrorToSparError
         . Polysemy.Error.mapError (httpErrorToSparError . postgresUsageErrorToHttpError)
-<<<<<<< HEAD
         . Polysemy.Error.mapError (httpErrorToSparError . migrationLockErrorToHttpError)
-=======
->>>>>>> 6bffaee90 (WPB-22972: migrate scim token and external-id stores to PostGreSQL)
         . interpretClientToIO (sparCtxCas ctx)
         . samlUserStoreInterpreter
         . idpRawMetadataStoreToCassandra

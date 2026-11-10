@@ -210,8 +210,7 @@ migrateSAMLUserRow ::
   ( PGConstraints r,
     Member TinyLog r,
     Member Resource r,
-    Member Race r,
-    Member (Input ClientState) r
+    Member Race r
   ) =>
   MigrationOptions ->
   Prometheus.Counter ->
