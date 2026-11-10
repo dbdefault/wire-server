@@ -20,32 +20,34 @@ module Wire.ScimExternalIdStore.Migration (migrateScimExternalIdsLoop) where
 import Cassandra hiding (Value)
 import Data.Conduit
 import Data.Conduit.List qualified as C
-30: @ours
-31: @ours
-32: @ours
-33: @ours
-34: @ours
-35: @ours
-36: @ours
-37: @ours
-38: @ours
-39: @ours
+import Data.Text.Encoding (encodeUtf8)
+import Data.UUID (UUID)
+import Hasql.Pool.Extended qualified as HasqlPoolExt
 import Imports
 import Polysemy
 import Polysemy.Async
 import Polysemy.AtomicState
 import Polysemy.Conc (interpretRace)
-31: @ours
+import Polysemy.Conc.Effect.Race hiding (Timeout)
+import Polysemy.Error (runError)
+import Polysemy.Input
+import Polysemy.Resource (Resource, resourceToIOFinal)
+import Polysemy.TinyLog
+import Prometheus qualified
+import System.Logger qualified as Log
+import Wire.API.PostgresMarshall
+import Wire.Migration
+import Wire.MigrationLock (MigrationLockError, ScimExternalIdLockKey (..))
 import Wire.Postgres
 import Wire.ScimExternalIdStore.Postgres qualified as Postgres
 import Wire.Sem.Logger (mapLogger)
 import Wire.Sem.Logger.TinyLog (loggerToTinyLog)
-32: @ours
+import Wire.Util (embedClient)
 
 type EffectStack =
   [ AtomicState Int,
     Input ClientState,
-33: @ours
+    Input HasqlPoolExt.Pool,
     Resource,
     Async,
     Race,
@@ -57,7 +59,7 @@ type EffectStack =
 migrateScimExternalIdsLoop ::
   MigrationOptions ->
   ClientState ->
-34: @ours
+  HasqlPoolExt.Pool ->
   Log.Logger ->
   Prometheus.Counter ->
   Prometheus.Counter ->
@@ -73,7 +75,7 @@ migrateScimExternalIdsLoop migOpts cassClient pgPool logger migCounter migFinish
     (interpreter cassClient pgPool logger "scim external ids")
     (migrateAllScimExternalIds migOpts migCounter migDuration)
 
-35: @ours
+interpreter :: ClientState -> HasqlPoolExt.Pool -> Log.Logger -> ByteString -> Sem EffectStack a -> IO (Int, a)
 interpreter cassClient pgPool logger name =
   runFinal
     . embedToFinal
@@ -92,13 +94,14 @@ selectAllScimExternalIds =
   "SELECT team, external_id, \"user\", creation_status FROM scim_external"
 
 migrateAllScimExternalIds ::
-36: @ours
+  ( Member (Input HasqlPoolExt.Pool) r,
     Member (Embed IO) r,
     Member (Input ClientState) r,
     Member TinyLog r,
     Member (AtomicState Int) r,
     Member Resource r,
-37: @ours
+    Member Race r,
+    Member Async r
   ) =>
   MigrationOptions ->
   Prometheus.Counter ->
@@ -114,14 +117,45 @@ migrateScimExternalIdRow ::
   ( PGConstraints r,
     Member TinyLog r,
     Member Resource r,
-38: @ours
+    Member Race r,
+    Member Async r,
+    Member (Input ClientState) r
   ) =>
   MigrationOptions ->
   Prometheus.Counter ->
   Prometheus.Vector Text Prometheus.Histogram ->
   (UUID, Text, UUID, Maybe Int32) ->
   Sem r ()
-39: @ours
+migrateScimExternalIdRow migOpts migCounter migDuration (team, eid, _uid, _status) =
+  -- Rows that fail to decode indicate corruption; skip them rather than fail
+  -- the migration (same convention as the Postgres read path).
+  for_ (hush (postgresUnmarshall team)) $ \team' ->
+    -- Copy under the exclusive (team, external-id) migration lock and re-read
+    -- the row from Cassandra inside the locked section: the scanned page can
+    -- be arbitrarily stale, so a mapping deleted by a concurrent dual-write
+    -- 'Delete' must not be resurrected in Postgres, and a newer creation
+    -- status (or user re-assignment) must not be overwritten by the stale
+    -- values. Dual-write mutations take the shared lock on the same key
+    -- ('Wire.ScimExternalIdStore.DualWrite'), so they are serialized against
+    -- this copy.
+    void . runError @MigrationLockError $
+      withExclusiveMigrationLockAndTimeout migOpts.timeout migDuration [ScimExternalIdLockKey (team', eid)] $ do
+        client <- input @ClientState
+        freshRows <- embedClient client $ retry x1 (query selectFreshScimExternalId (params LocalQuorum (team, eid)))
+        for_ (listToMaybe freshRows) $ \(freshUser, freshStatus) ->
+          for_
+            ( (,) <$> hush (postgresUnmarshall freshUser)
+                <*> hush (traverse postgresUnmarshall freshStatus)
+            )
+            $ \(uid'', status'') -> do
+              Postgres.upsertScimExternalIdRow team' eid uid'' status''
+              liftIO $ Prometheus.incCounter migCounter
+
+-- | Fresh point-read of one scim_external row, executed inside the exclusive
+-- migration lock.
+selectFreshScimExternalId :: PrepQuery R (UUID, Text) (UUID, Maybe Int32)
+selectFreshScimExternalId =
+  "SELECT \"user\", creation_status FROM scim_external WHERE team = ? AND external_id = ?"
 
 hush :: Either a b -> Maybe b
 hush = either (const Nothing) Just
